@@ -46,6 +46,9 @@ class InfoScheduler:
     ) -> None:
         self._register_interval_job(func, interval_seconds, job_id="event_detection")
 
+    def register_execution_job(self, func: Callable[[], None], *, interval_seconds: int) -> None:
+        self._register_interval_job(func, interval_seconds, job_id="trade_execution")
+
     def start(self) -> None:
         self._scheduler.resume()
 
