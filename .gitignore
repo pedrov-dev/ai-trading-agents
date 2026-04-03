@@ -21,10 +21,8 @@ build/
 *.egg-info/
 
 # IDE
-.vscode/*.log
-
-# Github
-.github/workflows/
+.vscode
+.github
 
 # Documentation
 docs/
