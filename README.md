@@ -8,6 +8,7 @@ Local-first event-driven crypto trading MVP for paper/dry-run execution on Krake
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements-dev.txt
+kraken-cli --help
 python -m pytest
 python src/main.py --base-dir .
 ```

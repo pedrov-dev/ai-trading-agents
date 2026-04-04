@@ -594,7 +594,7 @@ class ValidationRegistryClient(_SharedSepoliaClientBase):
         try:
             from web3 import Web3
 
-            return Web3.keccak(text=canonical_json).hex()
+            return _tx_hash_as_hex(Web3.keccak(text=canonical_json))
         except ImportError:
             return f"0x{hashlib.sha256(canonical_json.encode('utf-8')).hexdigest()}"
 

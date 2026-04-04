@@ -16,7 +16,9 @@ Kraken CLI adapter and immutable order models for paper/live order submission.
 
 ## Integration
 
-- Runs `kraken-cli` subprocess; writes audit events to `artifacts/orders_audit.jsonl`; honors `dry_run`/`live_enabled` flags.
+- Runs the repo-installed `kraken-cli` subprocess; writes audit events to `artifacts/orders_audit.jsonl`; honors `dry_run`/`live_enabled` flags.
+- `pip install -r requirements-dev.txt` now installs the local console script automatically via `-e .`.
+- If `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` are set, `kraken-cli add-order --validate` can call Kraken’s private `AddOrder` validation endpoint.
 
 ## Usage
 

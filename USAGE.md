@@ -12,6 +12,7 @@
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements-dev.txt
+kraken-cli --help
 python -m pytest
 python src/main.py --help
 ```
@@ -70,14 +71,17 @@ Use this to reach Kraken in **paper-only validation mode** without placing a rea
 
 1. Activate the environment.
 2. Disable local dry-run, enable the live path, and keep Kraken validation-only enabled.
-3. Run the normal local cycle.
+3. Optionally export `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` if you want the repo-installed `kraken-cli` to hit Kraken’s private `AddOrder` validation endpoint.
+4. Run the normal local cycle.
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 $env:KRAKEN_EXECUTION_DRY_RUN = "false"
 $env:KRAKEN_LIVE_ENABLED = "true"
 $env:KRAKEN_VALIDATE_ONLY = "true"
-# Optional: $env:KRAKEN_CLI_EXECUTABLE = "kraken-cli"
+# Optional for real Kraken validation:
+# $env:KRAKEN_API_KEY = "..."
+# $env:KRAKEN_API_SECRET = "..."
 python src/main.py --base-dir .
 ```
 

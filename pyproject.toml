@@ -18,6 +18,9 @@ dependencies = [
     "web3>=7.8,<8.0",
 ]
 
+[project.scripts]
+kraken-cli = "execution.kraken_cli:main"
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

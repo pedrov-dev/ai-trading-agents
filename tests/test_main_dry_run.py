@@ -67,6 +67,11 @@ def test_local_demo_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Path
         symbols=[BTC_SYMBOL],
         parse_feed=fake_parse_feed,
         http_get=fake_http_get,
+        env={
+            "KRAKEN_EXECUTION_DRY_RUN": "true",
+            "KRAKEN_LIVE_ENABLED": "false",
+            "KRAKEN_VALIDATE_ONLY": "true",
+        },
     )
 
     result = app.run_cycle(feed_group="market_news")
