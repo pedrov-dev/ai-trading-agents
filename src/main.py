@@ -22,7 +22,13 @@ from execution.kraken_cli import (
     KrakenCLIExecutor,
 )
 from execution.orders import ExecutionResult
-from identity.erc8004_registry import AgentIdentity, LocalERC8004Registry
+from identity.erc8004_registry import (
+    AgentIdentity,
+    IdentityRegistry,
+    LocalERC8004Registry,
+    OnChainERC8004Registry,
+    SepoliaContractsConfig,
+)
 from identity.reputation import ReputationEngine, ReputationSnapshot
 from info_scheduler import InfoScheduler
 from ingestion.prices_config import PRICE_SYMBOLS, PriceSymbol
@@ -196,6 +202,8 @@ class DryRunApplication:
         parse_feed: Any | None = None,
         http_get: Any | None = None,
         scheduler: InfoScheduler | None = None,
+        identity_registry: IdentityRegistry | None = None,
+        runtime_mode: str = "local",
     ) -> None:
         self.paths = paths
         self._scheduler = scheduler or InfoScheduler()
@@ -238,12 +246,22 @@ class DryRunApplication:
             starting_equity=10_000.0,
             starting_cash_usd=10_000.0,
         )
-        registry = LocalERC8004Registry()
+        self._runtime_mode = runtime_mode
+        registry = identity_registry or LocalERC8004Registry()
+        identity_metadata = {"mode": runtime_mode}
+        if isinstance(registry, OnChainERC8004Registry):
+            identity_metadata.update(
+                {
+                    "chain_id": str(registry.config.chain_id),
+                    "agent_registry_address": registry.config.agent_registry_address,
+                }
+            )
         self._identity = registry.register(
             display_name="AI Trading Agent Demo",
             strategy_name="simple_event_driven",
             owner=os.environ.get("USERNAME", "local-demo"),
-            metadata={"mode": "local_dry_run"},
+            exchange="sepolia" if runtime_mode == "sepolia" else "kraken",
+            metadata=identity_metadata,
         )
         self._reputation_engine = ReputationEngine()
         self._reputation = self._reputation_engine.initialize(self._identity.agent_id)
@@ -452,6 +470,18 @@ class DryRunApplication:
         return tuple(unseen)
 
 
+def build_identity_registry(
+    *,
+    runtime_mode: str = "local",
+    env: Mapping[str, str] | None = None,
+) -> IdentityRegistry:
+    if runtime_mode == "local":
+        return LocalERC8004Registry()
+    if runtime_mode == "sepolia":
+        return OnChainERC8004Registry(config=SepoliaContractsConfig.from_env(env))
+    raise ValueError(f"Unsupported runtime mode: {runtime_mode}")
+
+
 def build_local_demo_app(
     *,
     base_dir: str | Path = ROOT_DIR,
@@ -459,6 +489,8 @@ def build_local_demo_app(
     symbols: list[PriceSymbol] | None = None,
     parse_feed: Any | None = None,
     http_get: Any | None = None,
+    runtime_mode: str = "local",
+    env: Mapping[str, str] | None = None,
 ) -> DryRunApplication:
     return DryRunApplication(
         paths=DryRunRuntimePaths.from_base_dir(base_dir),
@@ -466,12 +498,14 @@ def build_local_demo_app(
         symbols=symbols or PRICE_SYMBOLS,
         parse_feed=parse_feed,
         http_get=http_get,
+        identity_registry=build_identity_registry(runtime_mode=runtime_mode, env=env),
+        runtime_mode=runtime_mode,
     )
 
 
 def _build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the local dry-run trading demo."
+        description="Run the trading demo in local dry-run or shared Sepolia mode."
     )
     parser.add_argument(
         "--base-dir",
@@ -483,13 +517,23 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         default="market_news",
         help="RSS feed group to ingest during the one-shot dry run.",
     )
+    parser.add_argument(
+        "--runtime-mode",
+        choices=("local", "sepolia"),
+        default=os.environ.get("TRADING_RUNTIME_MODE", "local"),
+        help="Execution mode: keep local dry-run defaults or use shared Sepolia contracts.",
+    )
     return parser
 
 
 def main() -> int:
     parser = _build_cli_parser()
     args = parser.parse_args()
-    app = build_local_demo_app(base_dir=args.base_dir)
+    app = build_local_demo_app(
+        base_dir=args.base_dir,
+        runtime_mode=args.runtime_mode,
+        env=os.environ,
+    )
     result = app.run_cycle(feed_group=args.feed_group)
     print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
     return 0

@@ -29,8 +29,21 @@ After a run, inspect:
 - `artifacts/validation_checkpoints.jsonl`
 - `artifacts/run_summary.json`
 
+## Shared Sepolia judging mode
+
+The repo now includes the first implementation pieces for the official ERC-8004 shared contracts on **Sepolia**.
+
+1. Copy values from `.env.example`
+2. Set `TRADING_RUNTIME_MODE=sepolia`
+3. Provide `SEPOLIA_RPC_URL`, `PRIVATE_KEY`, and `AGENT_WALLET_PRIVATE_KEY`
+4. Reuse the official shared addresses already included in `.env.example`
+5. Run `python src/main.py --runtime-mode sepolia --base-dir .`
+
+> Judging reads only from the shared contracts, so do **not** deploy private copies for leaderboard runs.
+
 ## Notes
 
 - Default mode is **safe dry run**.
 - No live trading is enabled by default.
+- `local` mode remains the default for tests and offline development.
 - For optional external-backed mode, copy values from `.env.example`.

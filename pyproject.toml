@@ -11,9 +11,11 @@ requires-python = ">=3.12"
 dependencies = [
     "apscheduler>=3.10,<4.0",
     "boto3>=1.35,<2.0",
+    "eth-account>=0.13,<0.14",
     "feedparser>=6.0,<7.0",
     "psycopg[binary]>=3.2,<4.0",
     "requests>=2.31,<3.0",
+    "web3>=7.8,<8.0",
 ]
 
 [tool.ruff]
@@ -45,4 +47,8 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "boto3"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["eth_account", "eth_account.*", "web3", "web3.*"]
 ignore_missing_imports = true
