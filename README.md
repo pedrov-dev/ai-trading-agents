@@ -12,6 +12,8 @@ python -m pytest
 python src/main.py --base-dir .
 ```
 
+For step-by-step run instructions for every supported mode, see `docs/usage.md`.
+
 ## What the local dry run does
 
 - ingests RSS articles and Kraken price quotes
