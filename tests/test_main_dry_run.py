@@ -225,9 +225,99 @@ def test_kraken_paper_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Pa
     assert result.portfolio.positions[0].symbol_id == "btc_usd"
 
     assert (tmp_path / "artifacts" / "orders_audit.jsonl").exists()
+    assert (tmp_path / "artifacts" / "trading_journal.jsonl").exists()
     assert (tmp_path / "artifacts" / "validation_artifacts.jsonl").exists()
     assert (tmp_path / "artifacts" / "validation_checkpoints.jsonl").exists()
     assert (tmp_path / "artifacts" / "run_summary.json").exists()
+
+
+def test_local_demo_app_restores_portfolio_from_trade_journal(tmp_path: Path) -> None:
+    def fake_parse_feed(_url: str) -> dict[str, object]:
+        return {
+            "entries": [
+                {
+                    "title": "SEC approved the bitcoin ETF after exchange review",
+                    "link": "https://example.test/bitcoin-etf-approved",
+                    "published": "2026-04-03T12:00:00+00:00",
+                }
+            ]
+        }
+
+    def fake_http_get(url: str, params: dict[str, str]) -> dict[str, object]:
+        if url.endswith("/Ticker"):
+            assert params == {"pair": BTC_SYMBOL.ticker}
+            return {
+                "error": [],
+                "result": {
+                    BTC_SYMBOL.ticker: {
+                        "c": ["68000.0", "1"],
+                        "o": "66000.0",
+                        "h": ["68500.0", "68500.0"],
+                        "l": ["65500.0", "65500.0"],
+                        "p": ["67000.0", "67000.0"],
+                    }
+                },
+            }
+        raise AssertionError(f"Unexpected URL called: {url}")
+
+    def fake_runner(command: tuple[str, ...], timeout_seconds: int) -> CommandRunResult:
+        assert timeout_seconds == 15
+        return CommandRunResult(
+            exit_code=0,
+            stdout='{"status": "validated", "validated": true}',
+            stderr="",
+        )
+
+    first_app = build_local_demo_app(
+        base_dir=tmp_path,
+        feed_groups={
+            "market_news": [
+                FeedSource(source_id="demo_feed", url="https://example.test/rss")
+            ]
+        },
+        symbols=[BTC_SYMBOL],
+        parse_feed=fake_parse_feed,
+        http_get=fake_http_get,
+        env={
+            "KRAKEN_API_KEY": "demo-key",
+            "KRAKEN_API_SECRET": "demo-secret",
+        },
+        trading_mode="paper",
+        execution_runner=fake_runner,
+        execution_config=KrakenCLIConfig(
+            executable="kraken-cli",
+            dry_run=False,
+            live_enabled=True,
+            validate_only=True,
+            audit_log_path=tmp_path / "artifacts" / "orders_audit.jsonl",
+        ),
+    )
+
+    first_result = first_app.run_cycle(feed_group="market_news")
+    restored_app = build_local_demo_app(
+        base_dir=tmp_path,
+        env={
+            "KRAKEN_API_KEY": "demo-key",
+            "KRAKEN_API_SECRET": "demo-secret",
+        },
+        trading_mode="paper",
+        execution_runner=fake_runner,
+        execution_config=KrakenCLIConfig(
+            executable="kraken-cli",
+            dry_run=False,
+            live_enabled=True,
+            validate_only=True,
+            audit_log_path=tmp_path / "artifacts" / "orders_audit.jsonl",
+        ),
+    )
+
+    restored_portfolio = restored_app._portfolio_provider.get_portfolio_snapshot()
+
+    assert first_result.portfolio.open_position_count() == 1
+    assert restored_portfolio.open_position_count() == 1
+    assert restored_portfolio.positions[0].symbol_id == "btc_usd"
+    assert restored_portfolio.cash_usd == first_result.portfolio.cash_usd
+    assert restored_portfolio.total_equity == first_result.portfolio.total_equity
 
 
 def test_local_demo_app_uses_env_agent_profile(tmp_path: Path) -> None:

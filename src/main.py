@@ -47,6 +47,11 @@ from ingestion.rss_ingestion import RSSIngestionService
 from monitoring.audit_log import AuditSummary, build_audit_summary_from_file
 from monitoring.drawdown import DrawdownSnapshot, EquityPoint, build_drawdown_snapshot
 from monitoring.pnl import PnLSnapshot, build_pnl_snapshot
+from monitoring.trade_journal import (
+    LocalTradeJournal,
+    TradeJournalEntry,
+    TradeJournalSummary,
+)
 from storage.local_runtime import (
     InMemoryEventDetectionRepository,
     InMemoryIngestionRunsRepository,
@@ -79,6 +84,7 @@ class RuntimePaths:
     artifacts_dir: Path
     raw_payload_dir: Path
     audit_log_path: Path
+    journal_log_path: Path
     artifacts_log_path: Path
     checkpoints_log_path: Path
     summary_path: Path
@@ -92,6 +98,7 @@ class RuntimePaths:
             artifacts_dir=artifacts_dir,
             raw_payload_dir=artifacts_dir / "raw_payloads",
             audit_log_path=artifacts_dir / DEFAULT_AUDIT_LOG_PATH.name,
+            journal_log_path=artifacts_dir / "trading_journal.jsonl",
             artifacts_log_path=artifacts_dir / "validation_artifacts.jsonl",
             checkpoints_log_path=artifacts_dir / "validation_checkpoints.jsonl",
             summary_path=artifacts_dir / "run_summary.json",
@@ -114,6 +121,7 @@ class RuntimeCycleResult:
     pnl_snapshot: PnLSnapshot
     drawdown_snapshot: DrawdownSnapshot
     audit_summary: AuditSummary
+    journal_summary: TradeJournalSummary
     reputation: ReputationSnapshot
 
     @property
@@ -179,6 +187,7 @@ class RuntimeCycleResult:
             "pnl_snapshot": self.pnl_snapshot.to_dict(),
             "drawdown_snapshot": self.drawdown_snapshot.to_dict(),
             "audit_summary": self.audit_summary.to_dict(),
+            "journal_summary": self.journal_summary.to_dict(),
             "reputation": self.reputation.to_dict(),
         }
 
@@ -291,6 +300,8 @@ class TradingApplication:
             starting_equity=10_000.0,
             starting_cash_usd=10_000.0,
         )
+        self._trade_journal = LocalTradeJournal(paths.journal_log_path)
+        self._trade_journal.replay_into(self._portfolio_provider)
         self._runtime_mode = runtime_mode
         self._trading_mode = trading_mode
         self._identity_layer = identity_layer
@@ -802,6 +813,7 @@ class TradingApplication:
         )
         drawdown_snapshot = build_drawdown_snapshot(self._equity_history)
         audit_summary = build_audit_summary_from_file(self.paths.audit_log_path)
+        journal_summary = self._trade_journal.build_summary()
 
         result = RuntimeCycleResult(
             rss_result=rss_result
@@ -830,6 +842,7 @@ class TradingApplication:
             pnl_snapshot=pnl_snapshot,
             drawdown_snapshot=drawdown_snapshot,
             audit_summary=audit_summary,
+            journal_summary=journal_summary,
             reputation=self._reputation,
         )
         self._artifact_ledger.record(
@@ -875,6 +888,7 @@ class TradingApplication:
             execution_result = self._executor.submit_trade_intent(intent)
             execution_results.append(execution_result)
             if execution_result.fill is not None and execution_result.is_successful:
+                portfolio_before_fill = working_portfolio
                 self._portfolio_provider.record_fill(
                     symbol_id=intent.symbol_id,
                     side=intent.side,
@@ -883,6 +897,14 @@ class TradingApplication:
                     filled_at=execution_result.fill.filled_at,
                 )
                 working_portfolio = self._portfolio_provider.get_portfolio_snapshot()
+                self._trade_journal.record_entry(
+                    TradeJournalEntry.from_execution_result(
+                        execution_result=execution_result,
+                        before_portfolio=portfolio_before_fill,
+                        after_portfolio=working_portfolio,
+                        notes=intent.rationale,
+                    )
+                )
             execution_artifact = ValidationArtifact.from_execution_result(
                 execution_result,
                 agent_id=self._identity.agent_id,
