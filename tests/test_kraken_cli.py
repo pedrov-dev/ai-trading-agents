@@ -58,6 +58,35 @@ def test_submit_trade_intent_dry_run_records_request_and_simulated_fill(tmp_path
     assert [entry["event"] for entry in entries] == ["order_requested", "order_simulated"]
 
 
+def test_submit_trade_intent_validate_only_hits_kraken_without_live_fill(tmp_path) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...], timeout_seconds: int) -> CommandRunResult:
+        assert timeout_seconds == 15
+        calls.append(command)
+        return CommandRunResult(exit_code=0, stdout='{"result": "validated"}', stderr="")
+
+    executor = KrakenCLIExecutor(
+        config=KrakenCLIConfig(
+            executable="kraken-cli",
+            dry_run=False,
+            live_enabled=True,
+            validate_only=True,
+            timeout_seconds=15,
+            audit_log_path=tmp_path / "orders.jsonl",
+        ),
+        runner=fake_runner,
+    )
+
+    result = executor.submit_trade_intent(_make_intent())
+
+    assert len(calls) == 1
+    assert "--validate" in calls[0]
+    assert result.status == OrderStatus.VALIDATED
+    assert result.fill is None
+    assert result.is_successful is True
+
+
 def test_submit_trade_intent_retries_transient_cli_failures(tmp_path) -> None:
     calls: list[tuple[str, ...]] = []
 

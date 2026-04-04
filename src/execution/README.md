@@ -29,4 +29,6 @@ print(result.to_dict())
 
 ## Notes
 
-- Defaults to simulated/dry-run; enable live with `KRAKEN_LIVE_ENABLED` and provide exchange credentials for production.
+- Defaults to simulated/dry-run.
+- For a live-connected **paper-only** run, set `KRAKEN_EXECUTION_DRY_RUN=false`, `KRAKEN_LIVE_ENABLED=true`, and keep `KRAKEN_VALIDATE_ONLY=true` so the CLI sends `--validate` without placing a real order.
+- Set `KRAKEN_VALIDATE_ONLY=false` only if you intentionally want real submission with exchange credentials.

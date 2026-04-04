@@ -64,23 +64,26 @@ python src/main.py --base-dir . --serve `
 
 ---
 
-## 4) Mode C — Local live-enabled Kraken execution
+## 4) Mode C — Live-connected Kraken paper trading
 
-Use this only if you intentionally want non-simulated order submission.
+Use this to reach Kraken in **paper-only validation mode** without placing a real order.
 
 1. Activate the environment.
-2. Explicitly disable dry-run and enable live execution in the shell.
+2. Disable local dry-run, enable the live path, and keep Kraken validation-only enabled.
 3. Run the normal local cycle.
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 $env:KRAKEN_EXECUTION_DRY_RUN = "false"
 $env:KRAKEN_LIVE_ENABLED = "true"
+$env:KRAKEN_VALIDATE_ONLY = "true"
 # Optional: $env:KRAKEN_CLI_EXECUTABLE = "kraken-cli"
 python src/main.py --base-dir .
 ```
 
 > This still uses `--runtime-mode local`; only the order execution path changes.
+>
+> `KRAKEN_VALIDATE_ONLY=true` keeps the Kraken CLI on `--validate`, so the order is checked by Kraken but **not actually submitted**. Set it to `false` only if you intentionally want real live submission.
 
 ---
 

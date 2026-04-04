@@ -53,6 +53,7 @@ class KrakenCLIConfig:
     subcommand: tuple[str, ...] = ("add-order",)
     dry_run: bool = True
     live_enabled: bool = False
+    validate_only: bool = True
     default_order_type: str = "market"
     timeout_seconds: int = 15
     max_retries: int = 2
@@ -67,6 +68,7 @@ class KrakenCLIConfig:
             executable=source.get("KRAKEN_CLI_EXECUTABLE", "kraken-cli"),
             dry_run=_parse_bool(source.get("KRAKEN_EXECUTION_DRY_RUN"), default=True),
             live_enabled=_parse_bool(source.get("KRAKEN_LIVE_ENABLED"), default=False),
+            validate_only=_parse_bool(source.get("KRAKEN_VALIDATE_ONLY"), default=True),
             default_order_type=source.get("KRAKEN_ORDER_TYPE", "market"),
             timeout_seconds=int(source.get("KRAKEN_CLI_TIMEOUT_SECONDS", "15")),
             max_retries=int(source.get("KRAKEN_CLI_MAX_RETRIES", "2")),
@@ -109,7 +111,11 @@ class KrakenCLIExecutor:
             *self._config.extra_args,
         ]
 
-        if request.execution_mode == ExecutionMode.DRY_RUN or self._config.dry_run:
+        if (
+            request.execution_mode == ExecutionMode.DRY_RUN
+            or self._config.dry_run
+            or self._config.validate_only
+        ):
             command.append("--validate")
 
         return tuple(command)
@@ -139,11 +145,10 @@ class KrakenCLIExecutor:
             response = _parse_json_object(run_result.stdout)
 
             if run_result.exit_code == 0:
-                status = (
-                    OrderStatus.FILLED
-                    if response.get("status") == "filled"
-                    else OrderStatus.SUBMITTED
-                )
+                validation_only = "--validate" in command
+                status = OrderStatus.VALIDATED if validation_only else OrderStatus.SUBMITTED
+                if not validation_only and response.get("status") == "filled":
+                    status = OrderStatus.FILLED
                 attempt = OrderAttempt(
                     attempt_number=attempt_number,
                     command=command,
@@ -158,7 +163,7 @@ class KrakenCLIExecutor:
                 )
                 attempts.append(attempt)
                 fill = None
-                event_name = "order_submitted"
+                event_name = "order_validated" if validation_only else "order_submitted"
                 if status == OrderStatus.FILLED:
                     fill = OrderFill(
                         status=OrderStatus.FILLED,

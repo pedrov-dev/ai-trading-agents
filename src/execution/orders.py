@@ -22,6 +22,7 @@ class OrderStatus(StrEnum):
 
     REQUESTED = "requested"
     SIMULATED = "simulated"
+    VALIDATED = "validated"
     SUBMITTED = "submitted"
     FILLED = "filled"
     RETRYING = "retrying"
@@ -192,6 +193,7 @@ class ExecutionResult:
         """Whether the order completed without a terminal failure."""
         return self.status in {
             OrderStatus.SIMULATED,
+            OrderStatus.VALIDATED,
             OrderStatus.SUBMITTED,
             OrderStatus.FILLED,
         }
