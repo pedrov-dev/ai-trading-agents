@@ -43,8 +43,12 @@ def test_sepolia_contracts_config_loads_shared_addresses_from_env() -> None:
             "RISK_ROUTER_ADDRESS": "0xd6A6952545FF6E6E6681c2d15C59f9EB8F40FdBC",
             "REPUTATION_REGISTRY_ADDRESS": "0x423a9904e39537a9997fbaF0f220d79D7d545763",
             "VALIDATION_REGISTRY_ADDRESS": "0x92bF63E5C7Ac6980f237a7164Ab413BE226187F1",
-            "PRIVATE_KEY": "0xoperator",
-            "AGENT_WALLET_PRIVATE_KEY": "0xagent",
+            "PRIVATE_KEY": (
+                "0x59c6995e998f97a5a0044966f094538c5f12027b2f9d1fb0f7c8f6a4038f6f9d"
+            ),
+            "AGENT_WALLET_PRIVATE_KEY": (
+                "0x8b3a350cf5c34c9194ca3a545d6f3ac0f723f0f2bf1f6ec8abca9015ae049631"
+            ),
             "AGENT_ID": "42",
         }
     )
@@ -54,6 +58,10 @@ def test_sepolia_contracts_config_loads_shared_addresses_from_env() -> None:
     assert config.agent_registry_address == "0x97b07dDc405B0c28B17559aFFE63BdB3632d0ca3"
     assert config.validation_registry_address == "0x92bF63E5C7Ac6980f237a7164Ab413BE226187F1"
     assert config.has_private_keys is True
+    assert config.operator_wallet_address is not None
+    assert config.agent_wallet_address is not None
+    assert config.operator_wallet_address.startswith("0x")
+    assert config.agent_wallet_address.startswith("0x")
 
 
 def test_risk_router_intent_maps_trade_intent_to_onchain_payload() -> None:

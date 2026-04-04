@@ -210,6 +210,10 @@ class DryRunApplication:
         scheduler: InfoScheduler | None = None,
         identity_registry: IdentityRegistry | None = None,
         runtime_mode: str = "local",
+        agent_display_name: str = "AI Trading Agent Demo",
+        agent_strategy_name: str = "simple_event_driven",
+        agent_owner: str | None = None,
+        agent_metadata: Mapping[str, str] | None = None,
     ) -> None:
         self.paths = paths
         self._scheduler = scheduler or InfoScheduler()
@@ -254,6 +258,13 @@ class DryRunApplication:
         )
         self._runtime_mode = runtime_mode
         registry = identity_registry or LocalERC8004Registry()
+        self._identity_registry = registry
+        self._agent_display_name = agent_display_name
+        self._agent_strategy_name = agent_strategy_name
+        self._agent_owner = agent_owner or os.environ.get("USERNAME", "local-demo")
+        self._agent_metadata = {
+            key: str(value) for key, value in (agent_metadata or {}).items()
+        }
         self._shared_contract_config = (
             registry.config if isinstance(registry, OnChainERC8004Registry) else None
         )
@@ -277,7 +288,8 @@ class DryRunApplication:
             if self._shared_contract_config is not None
             else None
         )
-        identity_metadata = {"mode": runtime_mode}
+        identity_metadata = dict(self._agent_metadata)
+        identity_metadata["mode"] = runtime_mode
         if isinstance(registry, OnChainERC8004Registry):
             identity_metadata.update(
                 {
@@ -285,13 +297,13 @@ class DryRunApplication:
                     "agent_registry_address": registry.config.agent_registry_address,
                 }
             )
-        self._identity = registry.register(
-            display_name="AI Trading Agent Demo",
-            strategy_name="simple_event_driven",
-            owner=os.environ.get("USERNAME", "local-demo"),
-            exchange="sepolia" if runtime_mode == "sepolia" else "kraken",
-            metadata=identity_metadata,
-        )
+            if registry.config.agent_wallet_address is not None:
+                identity_metadata.setdefault(
+                    "agent_wallet_address",
+                    registry.config.agent_wallet_address,
+                )
+        self._identity_metadata = identity_metadata
+        self._identity = self._initialize_identity(registry)
         self._reputation_engine = ReputationEngine()
         self._reputation = self._reputation_engine.initialize(self._identity.agent_id)
         self._artifact_ledger = LocalArtifactLedger(paths)
@@ -306,6 +318,65 @@ class DryRunApplication:
 
     @property
     def identity(self) -> AgentIdentity:
+        return self._identity
+
+    def _initialize_identity(self, registry: IdentityRegistry) -> AgentIdentity:
+        if isinstance(registry, OnChainERC8004Registry):
+            preconfigured_agent_id = registry.config.agent_id
+            if preconfigured_agent_id is not None:
+                try:
+                    existing = registry.get(str(preconfigured_agent_id))
+                except Exception as exc:
+                    existing = None
+                    self._identity_metadata.setdefault("registry_lookup_error", str(exc))
+                if existing is not None:
+                    return existing
+
+            pending_agent_id = (
+                str(preconfigured_agent_id)
+                if preconfigured_agent_id is not None
+                else "pending-registration"
+            )
+            return AgentIdentity(
+                agent_id=pending_agent_id,
+                display_name=self._agent_display_name,
+                strategy_name=self._agent_strategy_name,
+                owner=self._agent_owner,
+                exchange="sepolia",
+                wallet_address=registry.config.agent_wallet_address,
+                metadata=dict(self._identity_metadata)
+                | {"registration_status": "pending"},
+            )
+
+        return registry.register(
+            display_name=self._agent_display_name,
+            strategy_name=self._agent_strategy_name,
+            owner=self._agent_owner,
+            exchange="kraken",
+            metadata=self._identity_metadata,
+        )
+
+    def ensure_onchain_identity(self) -> AgentIdentity:
+        if not isinstance(self._identity_registry, OnChainERC8004Registry):
+            return self._identity
+        if self._identity.agent_id.isdigit():
+            self.persist_agent_id(self._identity.agent_id)
+            return self._identity
+
+        identity = self._identity_registry.register(
+            display_name=self._agent_display_name,
+            strategy_name=self._agent_strategy_name,
+            owner=self._agent_owner,
+            exchange="sepolia",
+            wallet_address=(
+                self._shared_contract_config.agent_wallet_address
+                if self._shared_contract_config is not None
+                else self._identity.wallet_address
+            ),
+            metadata=self._identity_metadata,
+        )
+        self._identity = identity
+        self.persist_agent_id(identity.agent_id)
         return self._identity
 
     def persist_agent_id(
@@ -364,12 +435,27 @@ class DryRunApplication:
             "runtime_mode": self._runtime_mode,
             "chain_id": self._shared_contract_config.chain_id,
             "agent_id": self._identity.agent_id,
+            "agent_display_name": self._agent_display_name,
+            "agent_strategy_name": self._agent_strategy_name,
             "agent_registry_address": self._shared_contract_config.agent_registry_address,
             "hackathon_vault_address": self._shared_contract_config.hackathon_vault_address,
             "risk_router_address": self._shared_contract_config.risk_router_address,
             "validation_registry_address": self._shared_contract_config.validation_registry_address,
             "reputation_registry_address": self._shared_contract_config.reputation_registry_address,
             "transaction_ready": self._shared_contract_config.is_ready_for_transactions,
+            "missing_required_values": list(
+                self._shared_contract_config.missing_required_values()
+            ),
+            "operator_wallet_address": self._shared_contract_config.operator_wallet_address,
+            "agent_wallet_address": self._shared_contract_config.agent_wallet_address,
+            "registration_status": self._identity.metadata.get(
+                "registration_status",
+                "registered" if self._identity.agent_id.isdigit() else "pending",
+            ),
+            "needs_registration": (
+                self._identity.metadata.get("registration_status") == "pending"
+                or not self._identity.agent_id.isdigit()
+            ),
             "agent_id_env_path": str(self.paths.base_dir / ".runtime.env"),
             "has_claimed_allocation": None,
             "vault_balance_wei": None,
@@ -392,6 +478,7 @@ class DryRunApplication:
     def claim_sandbox_allocation(self) -> OnChainTransactionResult:
         if self._vault_client is None:
             raise RuntimeError("Shared Sepolia mode is not enabled for this app instance.")
+        self.ensure_onchain_identity()
         return self._vault_client.claim_allocation(self._resolved_agent_id_for_chain())
 
     def submit_trade_intent_onchain(
@@ -403,6 +490,7 @@ class DryRunApplication:
     ) -> OnChainTransactionResult:
         if self._risk_router_client is None:
             raise RuntimeError("Shared Sepolia mode is not enabled for this app instance.")
+        self.ensure_onchain_identity()
         if self.identity.wallet_address is None:
             raise RuntimeError(
                 "The registered agent is missing a wallet address for RiskRouter signing."
@@ -440,6 +528,7 @@ class DryRunApplication:
     ) -> OnChainTransactionResult:
         if self._validation_registry_client is None:
             raise RuntimeError("Shared Sepolia mode is not enabled for this app instance.")
+        self.ensure_onchain_identity()
         return self._validation_registry_client.post_checkpoint(
             checkpoint,
             agent_id=self._resolved_agent_id_for_chain(),
@@ -449,6 +538,7 @@ class DryRunApplication:
     def get_onchain_reputation_score(self) -> int | None:
         if self._reputation_registry_client is None:
             return None
+        self.ensure_onchain_identity()
         return self._reputation_registry_client.get_average_score(
             self._resolved_agent_id_for_chain()
         )
@@ -458,6 +548,7 @@ class DryRunApplication:
         *,
         trade_intents: tuple[TradeIntent, ...],
         checkpoints: tuple[ValidationCheckpoint, ...],
+        register_agent: bool = False,
         claim_allocation: bool = False,
         submit_trade_intents: bool = False,
         post_checkpoints: bool = False,
@@ -465,6 +556,7 @@ class DryRunApplication:
         summary: dict[str, Any] = self.shared_contract_status()
         summary.update(
             {
+                "registration": None,
                 "claim_allocation": None,
                 "trade_submissions": [],
                 "checkpoint_posts": [],
@@ -474,6 +566,9 @@ class DryRunApplication:
 
         if self._shared_contract_config is None:
             return summary
+
+        if register_agent:
+            summary["registration"] = self.ensure_onchain_identity().to_dict()
 
         persisted_path = None
         resolved_agent_id = self._try_resolved_agent_id_for_chain()
@@ -721,6 +816,32 @@ def build_identity_registry(
     raise ValueError(f"Unsupported runtime mode: {runtime_mode}")
 
 
+def _load_agent_profile(env: Mapping[str, str] | None, runtime_mode: str) -> dict[str, Any]:
+    env_map = env or os.environ
+    display_name = str(env_map.get("AGENT_DISPLAY_NAME", "AI Trading Agent Demo")).strip()
+    strategy_name = str(
+        env_map.get("AGENT_STRATEGY_NAME", "simple_event_driven")
+    ).strip()
+    owner = str(
+        env_map.get("AGENT_OWNER", os.environ.get("USERNAME", "local-demo"))
+    ).strip()
+
+    metadata: dict[str, str] = {"mode": runtime_mode}
+    if env_map.get("AGENT_URI"):
+        metadata["agent_uri"] = str(env_map["AGENT_URI"]).strip()
+    if env_map.get("AGENT_CAPABILITIES"):
+        metadata["capabilities"] = str(env_map["AGENT_CAPABILITIES"]).strip()
+    if env_map.get("AGENT_DESCRIPTION"):
+        metadata["description"] = str(env_map["AGENT_DESCRIPTION"]).strip()
+
+    return {
+        "agent_display_name": display_name or "AI Trading Agent Demo",
+        "agent_strategy_name": strategy_name or "simple_event_driven",
+        "agent_owner": owner or os.environ.get("USERNAME", "local-demo"),
+        "agent_metadata": metadata,
+    }
+
+
 def build_local_demo_app(
     *,
     base_dir: str | Path = ROOT_DIR,
@@ -731,6 +852,7 @@ def build_local_demo_app(
     runtime_mode: str = "local",
     env: Mapping[str, str] | None = None,
 ) -> DryRunApplication:
+    agent_profile = _load_agent_profile(env, runtime_mode)
     return DryRunApplication(
         paths=DryRunRuntimePaths.from_base_dir(base_dir),
         feed_groups=feed_groups or RSS_FEED_GROUPS,
@@ -739,6 +861,7 @@ def build_local_demo_app(
         http_get=http_get,
         identity_registry=build_identity_registry(runtime_mode=runtime_mode, env=env),
         runtime_mode=runtime_mode,
+        **agent_profile,
     )
 
 
@@ -763,6 +886,14 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         help="Execution mode: keep local dry-run defaults or use shared Sepolia contracts.",
     )
     parser.add_argument(
+        "--register-agent",
+        action="store_true",
+        help=(
+            "Register the agent on the shared `AgentRegistry` if no numeric "
+            "`AGENT_ID` exists yet."
+        ),
+    )
+    parser.add_argument(
         "--claim-allocation",
         action="store_true",
         help="Call `HackathonVault.claimAllocation(agentId)` after the local run completes.",
@@ -777,6 +908,14 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Post generated checkpoints to the shared `ValidationRegistry`.",
     )
+    parser.add_argument(
+        "--full-flow",
+        action="store_true",
+        help=(
+            "Run the full shared-contract path: register, claim, submit intents, "
+            "and post checkpoints."
+        ),
+    )
     return parser
 
 
@@ -788,6 +927,12 @@ def main() -> int:
         runtime_mode=args.runtime_mode,
         env=os.environ,
     )
+    if args.full_flow:
+        args.register_agent = True
+        args.claim_allocation = True
+        args.submit_onchain = True
+        args.post_checkpoints = True
+
     result = app.run_cycle(feed_group=args.feed_group)
     payload = result.to_dict()
     payload["runtime_mode"] = args.runtime_mode
@@ -795,6 +940,7 @@ def main() -> int:
         payload["shared_contracts"] = app.run_shared_contract_actions(
             trade_intents=result.trade_intents,
             checkpoints=result.checkpoints,
+            register_agent=args.register_agent,
             claim_allocation=args.claim_allocation,
             submit_trade_intents=args.submit_onchain,
             post_checkpoints=args.post_checkpoints,

@@ -84,6 +84,24 @@ def test_local_demo_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Path
     assert (tmp_path / "artifacts" / "run_summary.json").exists()
 
 
+def test_local_demo_app_uses_env_agent_profile(tmp_path: Path) -> None:
+    app = build_local_demo_app(
+        base_dir=tmp_path,
+        env={
+            "AGENT_DISPLAY_NAME": "Sepolia Momentum Bot",
+            "AGENT_STRATEGY_NAME": "momentum_breakout_v2",
+            "AGENT_OWNER": "pedrov-dev",
+            "AGENT_URI": "https://example.test/agent.json",
+            "AGENT_CAPABILITIES": "trading,eip712-signing,checkpoints",
+        },
+    )
+
+    assert app.identity.display_name == "Sepolia Momentum Bot"
+    assert app.identity.strategy_name == "momentum_breakout_v2"
+    assert app.identity.owner == "pedrov-dev"
+    assert app.identity.metadata["agent_uri"] == "https://example.test/agent.json"
+
+
 def test_local_demo_app_persists_agent_id_env_file(tmp_path: Path) -> None:
     app = build_local_demo_app(base_dir=tmp_path)
     env_path = tmp_path / ".runtime.env"

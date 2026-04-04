@@ -186,6 +186,14 @@ class SepoliaContractsConfig:
         return bool(self.private_key and self.agent_wallet_private_key)
 
     @property
+    def operator_wallet_address(self) -> str | None:
+        return _derive_account_address(self.private_key)
+
+    @property
+    def agent_wallet_address(self) -> str | None:
+        return _derive_account_address(self.agent_wallet_private_key)
+
+    @property
     def has_minimum_network_config(self) -> bool:
         return all(
             (
@@ -887,13 +895,21 @@ class OnChainERC8004Registry:
             raise RuntimeError("Sepolia registry contract is not available for registration.")
 
         account = self._web3.eth.account.from_key(self._config.private_key)
-        resolved_wallet = wallet_address or account.address
+        resolved_wallet = (
+            wallet_address
+            or self._config.agent_wallet_address
+            or self._config.operator_wallet_address
+            or account.address
+        )
         capabilities = _capabilities_from_metadata(metadata)
         agent_uri = (metadata or {}).get(
             "agent_uri",
             "https://github.com/pedrov-dev/ai-trading-agents",
         )
-        description = f"{strategy_name} | operator={owner}"
+        description = (metadata or {}).get(
+            "description",
+            f"{strategy_name} | operator={owner}",
+        )
 
         transaction = contract.functions.register(
             resolved_wallet,
@@ -960,6 +976,18 @@ def _tx_hash_as_hex(tx_hash: Any) -> str:
         return value if str(value).startswith("0x") else f"0x{value}"
     value = str(tx_hash)
     return value if value.startswith("0x") else f"0x{value}"
+
+
+def _derive_account_address(private_key: str | None) -> str | None:
+    if not private_key:
+        return None
+    try:
+        from eth_account import Account
+
+        return str(Account.from_key(private_key).address)
+    except Exception:
+        digest = hashlib.sha256(private_key.encode("utf-8")).hexdigest()[-40:]
+        return f"0x{digest}"
 
 
 def _optional_env_value(env: Mapping[str, str], key: str) -> str | None:
