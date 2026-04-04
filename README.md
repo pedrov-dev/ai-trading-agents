@@ -18,6 +18,16 @@ python src/main.py --base-dir .
 
 For step-by-step run instructions for every supported mode, see `USAGE.md`.
 
+## Basic dashboard UI
+
+A super basic local dashboard is available for demos and judging:
+
+```bash
+streamlit run src/ui/dashboard.py
+```
+
+It shows portfolio/performance metrics from `artifacts/run_summary.json` and lets you trigger preflight checks, one-shot runs, scheduler start/stop, and ERC-8004 actions from the browser.
+
 ## What the Kraken runtime does
 
 - ingests RSS articles and Kraken price quotes

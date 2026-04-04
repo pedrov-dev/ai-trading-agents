@@ -15,6 +15,7 @@ dependencies = [
     "feedparser>=6.0,<7.0",
     "psycopg[binary]>=3.2,<4.0",
     "requests>=2.31,<3.0",
+    "streamlit>=1.44,<2.0",
     "web3>=7.8,<8.0",
 ]
 

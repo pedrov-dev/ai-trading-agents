@@ -21,7 +21,27 @@ python src/main.py --base-dir . --preflight
 
 ---
 
-## 2) Mode A — Kraken Paper Trading
+## 2) Optional local dashboard
+
+This repo also includes a super basic Streamlit UI for demos.
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+streamlit run src/ui/dashboard.py
+```
+
+Available controls in the UI:
+
+- `Preflight`
+- `Run one-shot cycle`
+- `Start/Stop scheduler`
+- ERC-8004 actions: register, claim, submit, post checkpoints, and full flow
+
+The dashboard reads the same artifact files written by the CLI and reflects the current execution safety mode.
+
+---
+
+## 3) Mode A — Kraken Paper Trading
 
 This is the default and safest mode. Orders go through Kraken's validation path and are **not** submitted live.
 
@@ -47,7 +67,7 @@ Artifacts written after the run:
 
 ---
 
-## 3) Mode B — Kraken Live Trading
+## 4) Mode B — Kraken Live Trading
 
 Use this only when you intentionally want real live order submission.
 
@@ -69,7 +89,7 @@ python src/main.py --base-dir . --trading-mode live
 
 ---
 
-## 4) Optional scheduler service
+## 5) Optional scheduler service
 
 Use this to keep the pipeline running continuously in either paper or live mode.
 
@@ -90,7 +110,7 @@ python src/main.py --base-dir . --trading-mode paper --serve `
 
 ---
 
-## 5) Optional ERC-8004 identity layer
+## 6) Optional ERC-8004 identity layer
 
 Use this when you want the shared Sepolia identity / reputation / validation flow on top of either Kraken trading mode.
 
@@ -105,7 +125,7 @@ python src/main.py --base-dir . --trading-mode paper --identity-layer erc8004
 
 ---
 
-## 6) Optional ERC-8004 on-chain actions
+## 7) Optional ERC-8004 on-chain actions
 
 Use this when you want to register the agent, claim the allocation, submit intents, or post checkpoints.
 
