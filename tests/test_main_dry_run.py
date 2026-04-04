@@ -6,10 +6,11 @@ import pytest
 from agent.portfolio import LocalPortfolioStateProvider
 from agent.risk import RiskCheckResult, RiskViolation
 from agent.signals import TradeIntent
+from execution.kraken_cli import CommandRunResult, KrakenCLIConfig
 from identity.erc8004_registry import SepoliaContractsConfig
 from ingestion.prices_config import PRICE_SYMBOLS
 from ingestion.rss_config import FeedSource
-from main import build_local_demo_app, validate_runtime_requirements
+from main import build_local_demo_app, build_runtime_preflight, validate_runtime_requirements
 
 BTC_SYMBOL = next(symbol for symbol in PRICE_SYMBOLS if symbol.symbol_id == "btc_usd")
 
@@ -59,6 +60,17 @@ def test_kraken_paper_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Pa
             }
         raise AssertionError(f"Unexpected URL called: {url}")
 
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...], timeout_seconds: int) -> CommandRunResult:
+        assert timeout_seconds == 15
+        calls.append(command)
+        return CommandRunResult(
+            exit_code=0,
+            stdout='{"status": "validated", "validated": true}',
+            stderr="",
+        )
+
     app = build_local_demo_app(
         base_dir=tmp_path,
         feed_groups={
@@ -67,8 +79,19 @@ def test_kraken_paper_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Pa
         symbols=[BTC_SYMBOL],
         parse_feed=fake_parse_feed,
         http_get=fake_http_get,
-        env={},
+        env={
+            "KRAKEN_API_KEY": "demo-key",
+            "KRAKEN_API_SECRET": "demo-secret",
+        },
         trading_mode="paper",
+        execution_runner=fake_runner,
+        execution_config=KrakenCLIConfig(
+            executable="kraken-cli",
+            dry_run=False,
+            live_enabled=True,
+            validate_only=True,
+            audit_log_path=tmp_path / "artifacts" / "orders_audit.jsonl",
+        ),
     )
 
     result = app.run_cycle(feed_group="market_news")
@@ -80,6 +103,8 @@ def test_kraken_paper_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Pa
     assert len(result.trade_intents) == 1
     assert len(result.execution_results) == 1
     assert result.execution_results[0].status.value == "validated"
+    assert len(calls) == 1
+    assert "--validate" in calls[0]
     assert result.artifact_count >= 4
     assert result.checkpoint_count >= 4
     assert result.audit_summary.total_events >= 2
@@ -110,13 +135,14 @@ def test_local_demo_app_uses_env_agent_profile(tmp_path: Path) -> None:
 
 
 def test_local_demo_app_persists_agent_id_env_file(tmp_path: Path) -> None:
-    app = build_local_demo_app(base_dir=tmp_path)
+    app = build_local_demo_app(base_dir=tmp_path, identity_layer="erc8004")
     env_path = tmp_path / ".runtime.env"
 
     app.persist_agent_id(agent_id=77, env_path=env_path)
 
     contents = env_path.read_text(encoding="utf-8")
     assert "AGENT_ID=77" in contents
+    assert "IDENTITY_LAYER=erc8004" in contents
 
 
 def test_shared_contract_status_includes_balance_and_claim_state() -> None:
@@ -155,7 +181,11 @@ def test_shared_contract_status_includes_balance_and_claim_state() -> None:
 def test_build_local_demo_app_defaults_to_kraken_paper_mode(tmp_path: Path) -> None:
     app = build_local_demo_app(
         base_dir=tmp_path,
-        env={"KRAKEN_CLI_TIMEOUT_SECONDS": "21"},
+        env={
+            "KRAKEN_CLI_TIMEOUT_SECONDS": "21",
+            "KRAKEN_API_KEY": "demo-key",
+            "KRAKEN_API_SECRET": "demo-secret",
+        },
     )
 
     assert app._executor._config.dry_run is False
@@ -186,6 +216,21 @@ def test_validate_runtime_requirements_blocks_live_submit_without_opt_in(
             trading_mode="live",
             identity_layer="none",
             base_dir=tmp_path,
+            env={
+                "KRAKEN_API_KEY": "demo-key",
+                "KRAKEN_API_SECRET": "demo-secret",
+            },
+        )
+
+
+def test_validate_runtime_requirements_blocks_paper_without_kraken_credentials(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="KRAKEN_API_KEY"):
+        validate_runtime_requirements(
+            trading_mode="paper",
+            identity_layer="none",
+            base_dir=tmp_path,
             env={},
         )
 
@@ -196,9 +241,41 @@ def test_validate_runtime_requirements_blocks_missing_erc8004_keys(tmp_path: Pat
             trading_mode="paper",
             identity_layer="erc8004",
             base_dir=tmp_path,
-            env={"SEPOLIA_RPC_URL": "https://ethereum-sepolia-rpc.publicnode.com"},
+            env={
+                "SEPOLIA_RPC_URL": "https://ethereum-sepolia-rpc.publicnode.com",
+                "KRAKEN_API_KEY": "demo-key",
+                "KRAKEN_API_SECRET": "demo-secret",
+            },
             require_transaction_keys=True,
         )
+
+
+def test_build_runtime_preflight_reports_ready_paper_mode(tmp_path: Path) -> None:
+    report = build_runtime_preflight(
+        trading_mode="paper",
+        identity_layer="none",
+        base_dir=tmp_path,
+        env={
+            "KRAKEN_API_KEY": "demo-key",
+            "KRAKEN_API_SECRET": "demo-secret",
+        },
+    )
+
+    assert report["status"] == "ready"
+    assert report["checks"]["kraken_credentials_present"] is True
+    assert report["checks"]["will_submit_real_orders"] is False
+
+
+def test_build_runtime_preflight_reports_live_mode_blockers(tmp_path: Path) -> None:
+    report = build_runtime_preflight(
+        trading_mode="live",
+        identity_layer="none",
+        base_dir=tmp_path,
+        env={},
+    )
+
+    assert report["status"] == "error"
+    assert any("KRAKEN_CLI_ALLOW_LIVE_SUBMIT" in issue for issue in report["issues"])
 
 
 def test_execute_trade_cycle_skips_execution_when_runtime_risk_recheck_fails(

@@ -10,6 +10,9 @@ python -m venv .venv
 pip install -r requirements-dev.txt
 kraken-cli --help
 python -m pytest
+set KRAKEN_API_KEY=...
+set KRAKEN_API_SECRET=...
+python src/main.py --base-dir . --preflight
 python src/main.py --base-dir .
 ```
 
@@ -63,7 +66,9 @@ The run summary now reports shared-contract status, including missing env values
 ## Notes
 
 - Default mode is **Kraken paper trading**.
+- Paper mode requires real `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` so Kraken can validate the order on the exchange endpoint.
 - Live trading is available with `python src/main.py --base-dir . --trading-mode live` plus `KRAKEN_CLI_ALLOW_LIVE_SUBMIT=true` and exchange credentials.
 - Optional on-chain identity is enabled with `--identity-layer erc8004`.
+- `python src/main.py --base-dir . --preflight` checks Kraken and optional ERC-8004 readiness without running a trading cycle.
 - The app auto-loads `.env` / `.runtime.env` from the selected `--base-dir`.
 - For optional external-backed mode, copy values from `.env.example`.

@@ -7,6 +7,7 @@
 1. Create and activate the virtual environment.
 2. Install dependencies.
 3. Optionally run the test suite.
+4. Run a preflight before your first paper or live cycle.
 
 ```powershell
 python -m venv .venv
@@ -15,6 +16,7 @@ pip install -r requirements-dev.txt
 kraken-cli --help
 python -m pytest
 python src/main.py --help
+python src/main.py --base-dir . --preflight
 ```
 
 ---
@@ -24,11 +26,13 @@ python src/main.py --help
 This is the default and safest mode. Orders go through Kraken's validation path and are **not** submitted live.
 
 1. Activate the environment.
-2. Optionally put `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` in `.env` if you want Kraken's private `AddOrder` validation endpoint.
-3. Run one complete ingest → detect → strategy → execution cycle.
+2. Put `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` in `.env`.
+3. Run a preflight to confirm paper readiness.
+4. Run one complete ingest → detect → strategy → execution cycle.
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
+python src/main.py --base-dir . --trading-mode paper --preflight
 python src/main.py --base-dir . --trading-mode paper
 ```
 
@@ -49,13 +53,15 @@ Use this only when you intentionally want real live order submission.
 
 1. Activate the environment.
 2. Set `KRAKEN_API_KEY`, `KRAKEN_API_SECRET`, and `KRAKEN_CLI_ALLOW_LIVE_SUBMIT=true`.
-3. Run the live mode explicitly.
+3. Run a preflight to confirm live readiness.
+4. Run the live mode explicitly.
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 $env:KRAKEN_API_KEY = "..."
 $env:KRAKEN_API_SECRET = "..."
 $env:KRAKEN_CLI_ALLOW_LIVE_SUBMIT = "true"
+python src/main.py --base-dir . --trading-mode live --preflight
 python src/main.py --base-dir . --trading-mode live
 ```
 
@@ -128,5 +134,6 @@ If registration succeeds, the numeric `AGENT_ID` is persisted to `.runtime.env` 
 ## Quick troubleshooting
 
 - Check all CLI options with `python src/main.py --help`.
+- Use `python src/main.py --base-dir . --preflight` to inspect readiness without sending a request cycle.
 - If the ERC-8004 layer reports missing config, export the required variables first.
 - `--serve` cannot be combined with the on-chain action flags.

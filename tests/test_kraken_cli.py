@@ -176,7 +176,10 @@ def test_submit_trade_intent_retries_transient_cli_failures(tmp_path) -> None:
     assert all(attempt.retryable for attempt in result.attempts)
 
 
-def test_kraken_cli_main_validate_mode_returns_success_without_credentials(capsys) -> None:
+def test_kraken_cli_main_validate_mode_requires_credentials(capsys, monkeypatch) -> None:
+    monkeypatch.delenv("KRAKEN_API_KEY", raising=False)
+    monkeypatch.delenv("KRAKEN_API_SECRET", raising=False)
+
     exit_code = kraken_cli_main(
         [
             "add-order",
@@ -195,13 +198,10 @@ def test_kraken_cli_main_validate_mode_returns_success_without_credentials(capsy
     )
 
     captured = capsys.readouterr()
-    payload = json.loads(captured.out)
 
-    assert exit_code == 0
-    assert payload["status"] == "validated"
-    assert payload["validated"] is True
-    assert payload["live_submission"] is False
-    assert payload["pair"] == "XBT/USD"
+    assert exit_code == 2
+    assert "KRAKEN_API_KEY" in captured.err
+    assert "KRAKEN_API_SECRET" in captured.err
 
 
 def test_kraken_cli_main_live_submit_requires_api_credentials(capsys, monkeypatch) -> None:

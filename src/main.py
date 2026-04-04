@@ -19,6 +19,7 @@ from detection.event_detection import DetectedEvent, RuleBasedEventDetector
 from detection.event_detection_service import EventDetectionService
 from execution.kraken_cli import (
     DEFAULT_AUDIT_LOG_PATH,
+    CommandRunner,
     KrakenCLIConfig,
     KrakenCLIExecutor,
 )
@@ -64,7 +65,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
 @dataclass(frozen=True)
-class DryRunRuntimePaths:
+class RuntimePaths:
     """Filesystem locations used by the Kraken runtime flow."""
 
     base_dir: Path
@@ -76,7 +77,7 @@ class DryRunRuntimePaths:
     summary_path: Path
 
     @classmethod
-    def from_base_dir(cls, base_dir: str | Path) -> DryRunRuntimePaths:
+    def from_base_dir(cls, base_dir: str | Path) -> RuntimePaths:
         resolved = Path(base_dir)
         artifacts_dir = resolved / "artifacts"
         return cls(
@@ -91,7 +92,7 @@ class DryRunRuntimePaths:
 
 
 @dataclass(frozen=True)
-class DryRunCycleResult:
+class RuntimeCycleResult:
     """Outcome of one Kraken runtime cycle across ingestion, detection, and execution."""
 
     rss_result: IngestionRunResult
@@ -178,7 +179,7 @@ class DryRunCycleResult:
 class LocalArtifactLedger:
     """Persist runtime outputs as simple JSONL and JSON summary files."""
 
-    def __init__(self, paths: DryRunRuntimePaths) -> None:
+    def __init__(self, paths: RuntimePaths) -> None:
         self._artifacts_store = JsonlFileStore(paths.artifacts_log_path)
         self._checkpoints_store = JsonlFileStore(paths.checkpoints_log_path)
         self._summary_store = JsonlFileStore(paths.summary_path)
@@ -197,13 +198,13 @@ class LocalArtifactLedger:
         self._summary_store.write_json(summary)
 
 
-class DryRunApplication:
+class TradingApplication:
     """Local demo harness for the event-driven Kraken paper/live trading workflow."""
 
     def __init__(
         self,
         *,
-        paths: DryRunRuntimePaths,
+        paths: RuntimePaths,
         feed_groups: dict[str, list[FeedSource]],
         symbols: list[PriceSymbol],
         parse_feed: Any | None = None,
@@ -211,6 +212,7 @@ class DryRunApplication:
         scheduler: InfoScheduler | None = None,
         identity_registry: IdentityRegistry | None = None,
         execution_config: KrakenCLIConfig | None = None,
+        execution_runner: CommandRunner | None = None,
         runtime_mode: str = "local",
         trading_mode: str = "paper",
         identity_layer: str = "none",
@@ -255,7 +257,10 @@ class DryRunApplication:
             validate_only=True,
             audit_log_path=paths.audit_log_path,
         )
-        self._executor = KrakenCLIExecutor(config=resolved_execution_config)
+        self._executor = KrakenCLIExecutor(
+            config=resolved_execution_config,
+            runner=execution_runner,
+        )
         self._portfolio_provider = LocalPortfolioStateProvider(
             starting_equity=10_000.0,
             starting_cash_usd=10_000.0,
@@ -425,23 +430,23 @@ class DryRunApplication:
         )
         updated_lines: list[str] = []
         saw_agent_id = False
-        saw_runtime_mode = False
+        saw_identity_layer = False
 
         for line in existing_lines:
             stripped = line.strip()
             if stripped.startswith("AGENT_ID="):
                 updated_lines.append(f"AGENT_ID={resolved_agent_id}")
                 saw_agent_id = True
-            elif stripped.startswith("TRADING_RUNTIME_MODE=") and self._runtime_mode == "sepolia":
-                updated_lines.append("TRADING_RUNTIME_MODE=sepolia")
-                saw_runtime_mode = True
+            elif stripped.startswith("IDENTITY_LAYER=") and self._identity_layer == "erc8004":
+                updated_lines.append("IDENTITY_LAYER=erc8004")
+                saw_identity_layer = True
             else:
                 updated_lines.append(line)
 
         if not saw_agent_id:
             updated_lines.append(f"AGENT_ID={resolved_agent_id}")
-        if self._runtime_mode == "sepolia" and not saw_runtime_mode:
-            updated_lines.append("TRADING_RUNTIME_MODE=sepolia")
+        if self._identity_layer == "erc8004" and not saw_identity_layer:
+            updated_lines.append("IDENTITY_LAYER=erc8004")
 
         target_path.write_text("\n".join(updated_lines).rstrip() + "\n", encoding="utf-8")
         os.environ["AGENT_ID"] = resolved_agent_id
@@ -693,7 +698,7 @@ class DryRunApplication:
             batch_size=100,
         )
 
-    def run_cycle(self, *, feed_group: str = "market_news") -> DryRunCycleResult:
+    def run_cycle(self, *, feed_group: str = "market_news") -> RuntimeCycleResult:
         rss_result = self.ingest_rss_group(feed_group=feed_group)
         prices_result = self.ingest_prices()
         classification_count = self.classify_events()
@@ -709,7 +714,7 @@ class DryRunApplication:
         rss_result: IngestionRunResult | None = None,
         prices_result: IngestionRunResult | None = None,
         classification_count: int = 0,
-    ) -> DryRunCycleResult:
+    ) -> RuntimeCycleResult:
         current_portfolio = self._portfolio_provider.get_portfolio_snapshot()
         detected_events = self._new_detected_events()
         trade_intents = tuple(
@@ -785,7 +790,7 @@ class DryRunApplication:
         drawdown_snapshot = build_drawdown_snapshot(self._equity_history)
         audit_summary = build_audit_summary_from_file(self.paths.audit_log_path)
 
-        result = DryRunCycleResult(
+        result = RuntimeCycleResult(
             rss_result=rss_result
             or IngestionRunResult(
                 run_id="manual-rss",
@@ -871,9 +876,7 @@ def _normalize_trading_mode(trading_mode: str | None) -> str:
     resolved = str(trading_mode or "paper").strip().lower().replace("_", "-")
     aliases = {
         "paper": "paper",
-        "kraken-paper": "paper",
         "live": "live",
-        "kraken-live": "live",
     }
     if resolved not in aliases:
         raise ValueError(
@@ -903,20 +906,14 @@ def _normalize_identity_layer(identity_layer: str | None) -> str:
 def _resolve_identity_runtime(
     *,
     identity_layer: str | None = None,
-    runtime_mode: str | None = None,
     env: Mapping[str, str] | None = None,
 ) -> tuple[str, str]:
     env_map = env if env is not None else os.environ
     candidate = identity_layer
     if candidate is None:
         env_layer = str(env_map.get("IDENTITY_LAYER", "")).strip()
-        env_runtime_mode = str(env_map.get("TRADING_RUNTIME_MODE", "")).strip()
         if env_layer:
             candidate = env_layer
-        elif runtime_mode is not None:
-            candidate = runtime_mode
-        elif env_runtime_mode:
-            candidate = env_runtime_mode
     resolved_layer = _normalize_identity_layer(candidate)
     resolved_runtime_mode = "sepolia" if resolved_layer == "erc8004" else "local"
     return resolved_layer, resolved_runtime_mode
@@ -972,7 +969,7 @@ def _load_agent_profile(env: Mapping[str, str] | None, runtime_mode: str) -> dic
 
 def _build_execution_config(
     *,
-    paths: DryRunRuntimePaths,
+    paths: RuntimePaths,
     env: Mapping[str, str] | None = None,
 ) -> KrakenCLIConfig:
     config = KrakenCLIConfig.from_env(env)
@@ -990,11 +987,11 @@ def build_local_demo_app(
     http_get: Any | None = None,
     trading_mode: str = "paper",
     identity_layer: str | None = None,
-    runtime_mode: str | None = None,
     env: Mapping[str, str] | None = None,
-    kraken_paper: bool = False,
-) -> DryRunApplication:
-    resolved_trading_mode = "paper" if kraken_paper else _normalize_trading_mode(trading_mode)
+    execution_config: KrakenCLIConfig | None = None,
+    execution_runner: CommandRunner | None = None,
+) -> TradingApplication:
+    resolved_trading_mode = _normalize_trading_mode(trading_mode)
     runtime_env = _resolve_runtime_env(
         base_dir=base_dir,
         env=env,
@@ -1002,13 +999,12 @@ def build_local_demo_app(
     )
     resolved_identity_layer, resolved_runtime_mode = _resolve_identity_runtime(
         identity_layer=identity_layer,
-        runtime_mode=runtime_mode,
         env=runtime_env,
     )
     runtime_env["IDENTITY_LAYER"] = resolved_identity_layer
-    paths = DryRunRuntimePaths.from_base_dir(base_dir)
+    paths = RuntimePaths.from_base_dir(base_dir)
     agent_profile = _load_agent_profile(runtime_env, resolved_runtime_mode)
-    return DryRunApplication(
+    return TradingApplication(
         paths=paths,
         feed_groups=feed_groups or RSS_FEED_GROUPS,
         symbols=symbols or PRICE_SYMBOLS,
@@ -1018,7 +1014,8 @@ def build_local_demo_app(
             runtime_mode=resolved_runtime_mode,
             env=runtime_env,
         ),
-        execution_config=_build_execution_config(paths=paths, env=runtime_env),
+        execution_config=execution_config or _build_execution_config(paths=paths, env=runtime_env),
+        execution_runner=execution_runner,
         runtime_mode=resolved_runtime_mode,
         trading_mode=resolved_trading_mode,
         identity_layer=resolved_identity_layer,
@@ -1026,15 +1023,14 @@ def build_local_demo_app(
     )
 
 
-def validate_runtime_requirements(
+def build_runtime_preflight(
     *,
     trading_mode: str = "paper",
     identity_layer: str | None = None,
-    runtime_mode: str | None = None,
-    base_dir: str | Path,
+    base_dir: str | Path = ROOT_DIR,
     env: Mapping[str, str] | None = None,
     require_transaction_keys: bool = False,
-) -> None:
+) -> dict[str, Any]:
     resolved_trading_mode = _normalize_trading_mode(trading_mode)
     env_map = _resolve_runtime_env(
         base_dir=base_dir,
@@ -1043,81 +1039,123 @@ def validate_runtime_requirements(
     )
     resolved_identity_layer, resolved_runtime_mode = _resolve_identity_runtime(
         identity_layer=identity_layer,
-        runtime_mode=runtime_mode,
         env=env_map,
     )
 
-    paths = DryRunRuntimePaths.from_base_dir(base_dir)
-    paths.artifacts_dir.mkdir(parents=True, exist_ok=True)
-    paths.raw_payload_dir.mkdir(parents=True, exist_ok=True)
-
-    probe_path = paths.artifacts_dir / ".write_probe"
+    paths = RuntimePaths.from_base_dir(base_dir)
+    issues: list[str] = []
     try:
+        paths.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        paths.raw_payload_dir.mkdir(parents=True, exist_ok=True)
+        probe_path = paths.artifacts_dir / ".write_probe"
         probe_path.write_text("ok", encoding="utf-8")
         probe_path.unlink(missing_ok=True)
-    except OSError as exc:
-        raise ValueError(
-            f"Artifacts directory is not writable: {paths.artifacts_dir}"
-        ) from exc
+        artifacts_writable = True
+    except OSError:
+        artifacts_writable = False
+        issues.append(f"Artifacts directory is not writable: {paths.artifacts_dir}")
 
     execution_config = KrakenCLIConfig.from_env(env_map)
-    if execution_config.dry_run or not execution_config.live_enabled:
-        raise ValueError(
-            "Only Kraken paper/live trading modes are supported. Use `paper` or `live`."
-        )
-
-    allow_live_submit = str(env_map.get("KRAKEN_CLI_ALLOW_LIVE_SUBMIT", "")).strip().lower() in {
+    kraken_credentials_present = bool(str(env_map.get("KRAKEN_API_KEY", "")).strip()) and bool(
+        str(env_map.get("KRAKEN_API_SECRET", "")).strip()
+    )
+    live_submit_enabled = str(env_map.get("KRAKEN_CLI_ALLOW_LIVE_SUBMIT", "")).strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
     }
-    if resolved_trading_mode == "live":
-        if not allow_live_submit:
-            raise ValueError(
-                "Kraken live trading requires `KRAKEN_CLI_ALLOW_LIVE_SUBMIT=true`."
-            )
-        if not str(env_map.get("KRAKEN_API_KEY", "")).strip() or not str(
-            env_map.get("KRAKEN_API_SECRET", "")
-        ).strip():
-            raise ValueError(
-                "Kraken live trading requires `KRAKEN_API_KEY` and `KRAKEN_API_SECRET`."
-            )
 
+    if execution_config.dry_run or not execution_config.live_enabled:
+        issues.append(
+            "Only Kraken paper/live trading modes are supported. Use `paper` or `live`."
+        )
+    if not kraken_credentials_present:
+        issues.append(
+            "Kraken paper/live trading requires `KRAKEN_API_KEY` and `KRAKEN_API_SECRET`."
+        )
+    if resolved_trading_mode == "live" and not live_submit_enabled:
+        issues.append("Kraken live trading requires `KRAKEN_CLI_ALLOW_LIVE_SUBMIT=true`.")
     if require_transaction_keys and resolved_identity_layer != "erc8004":
-        raise ValueError(
-            "On-chain identity actions require `--identity-layer erc8004`."
-        )
+        issues.append("On-chain identity actions require `--identity-layer erc8004`.")
 
-    if resolved_runtime_mode != "sepolia":
-        return
+    sepolia_missing: list[str] = []
+    if resolved_runtime_mode == "sepolia":
+        config = SepoliaContractsConfig.from_env(env_map)
+        sepolia_missing = list(config.missing_required_values())
+        if not require_transaction_keys:
+            sepolia_missing = [
+                key
+                for key in sepolia_missing
+                if key not in {"PRIVATE_KEY", "AGENT_WALLET_PRIVATE_KEY"}
+            ]
+        if sepolia_missing:
+            issues.append(
+                "Missing required Sepolia configuration: " + ", ".join(sorted(sepolia_missing))
+            )
+        invalid_keys: list[str] = []
+        if config.private_key and config.operator_wallet_address is None:
+            invalid_keys.append("PRIVATE_KEY")
+        if config.agent_wallet_private_key and config.agent_wallet_address is None:
+            invalid_keys.append("AGENT_WALLET_PRIVATE_KEY")
+        if invalid_keys:
+            issues.append("Unable to derive wallet addresses from: " + ", ".join(invalid_keys))
 
-    config = SepoliaContractsConfig.from_env(env_map)
-    missing = list(config.missing_required_values())
-    if not require_transaction_keys:
-        missing = [
-            key
-            for key in missing
-            if key not in {"PRIVATE_KEY", "AGENT_WALLET_PRIVATE_KEY"}
-        ]
-    if missing:
-        raise ValueError(
-            "Missing required Sepolia configuration: " + ", ".join(sorted(missing))
-        )
+    will_submit_real_orders = (
+        execution_config.live_enabled
+        and not execution_config.dry_run
+        and not execution_config.validate_only
+    )
+    live_connected_paper = (
+        execution_config.live_enabled
+        and not execution_config.dry_run
+        and execution_config.validate_only
+    )
 
-    invalid_keys: list[str] = []
-    if config.private_key and config.operator_wallet_address is None:
-        invalid_keys.append("PRIVATE_KEY")
-    if config.agent_wallet_private_key and config.agent_wallet_address is None:
-        invalid_keys.append("AGENT_WALLET_PRIVATE_KEY")
-    if invalid_keys:
-        raise ValueError(
-            "Unable to derive wallet addresses from: " + ", ".join(invalid_keys)
-        )
+    return {
+        "status": "ready" if not issues else "error",
+        "trading_mode": resolved_trading_mode,
+        "identity_layer": resolved_identity_layer,
+        "runtime_mode": resolved_runtime_mode,
+        "checks": {
+            "artifacts_writable": artifacts_writable,
+            "kraken_credentials_present": kraken_credentials_present,
+            "live_submit_enabled": live_submit_enabled,
+            "live_connected_paper_trading": live_connected_paper,
+            "will_submit_real_orders": will_submit_real_orders,
+            "sepolia_missing_required_values": sepolia_missing,
+        },
+        "execution_config": {
+            "kraken_cli_executable": execution_config.executable,
+            "kraken_dry_run": execution_config.dry_run,
+            "kraken_live_enabled": execution_config.live_enabled,
+            "kraken_validate_only": execution_config.validate_only,
+        },
+        "issues": issues,
+    }
+
+
+def validate_runtime_requirements(
+    *,
+    trading_mode: str = "paper",
+    identity_layer: str | None = None,
+    base_dir: str | Path,
+    env: Mapping[str, str] | None = None,
+    require_transaction_keys: bool = False,
+) -> None:
+    report = build_runtime_preflight(
+        trading_mode=trading_mode,
+        identity_layer=identity_layer,
+        base_dir=base_dir,
+        env=env,
+        require_transaction_keys=require_transaction_keys,
+    )
+    if report["issues"]:
+        raise ValueError(str(report["issues"][0]))
 
 
 def run_scheduler_service(
-    app: DryRunApplication,
+    app: TradingApplication,
     *,
     feed_group: str = "market_news",
     rss_interval_seconds: int = 120,
@@ -1206,19 +1244,8 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--identity-layer",
         choices=("none", "erc8004"),
-        default=(
-            "erc8004"
-            if os.environ.get("IDENTITY_LAYER") == "erc8004"
-            or os.environ.get("TRADING_RUNTIME_MODE") == "sepolia"
-            else "none"
-        ),
+        default=("erc8004" if os.environ.get("IDENTITY_LAYER") == "erc8004" else "none"),
         help="Optional identity layer for shared ERC-8004 / Sepolia actions.",
-    )
-    parser.add_argument(
-        "--runtime-mode",
-        choices=("local", "sepolia"),
-        default=None,
-        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--register-agent",
@@ -1257,9 +1284,9 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         help="Run the recurring scheduler instead of a one-shot cycle.",
     )
     parser.add_argument(
-        "--kraken-paper",
+        "--preflight",
         action="store_true",
-        help=argparse.SUPPRESS,
+        help="Validate Kraken and optional ERC-8004 configuration without running a cycle.",
     )
     parser.add_argument(
         "--rss-interval-seconds",
@@ -1307,16 +1334,25 @@ def main() -> int:
                 args.post_checkpoints,
             )
         )
-        resolved_trading_mode = "paper" if args.kraken_paper else args.trading_mode
+        resolved_trading_mode = args.trading_mode
         resolved_env = _resolve_runtime_env(
             base_dir=args.base_dir,
             env=os.environ,
             trading_mode=resolved_trading_mode,
         )
+        if args.preflight:
+            report = build_runtime_preflight(
+                trading_mode=resolved_trading_mode,
+                identity_layer=args.identity_layer,
+                base_dir=args.base_dir,
+                env=resolved_env,
+                require_transaction_keys=require_transaction_keys,
+            )
+            print(json.dumps(report, indent=2, sort_keys=True))
+            return 0 if report["status"] == "ready" else 2
         validate_runtime_requirements(
             trading_mode=resolved_trading_mode,
             identity_layer=args.identity_layer,
-            runtime_mode=args.runtime_mode,
             base_dir=args.base_dir,
             env=resolved_env,
             require_transaction_keys=require_transaction_keys,
@@ -1325,9 +1361,7 @@ def main() -> int:
             base_dir=args.base_dir,
             trading_mode=resolved_trading_mode,
             identity_layer=args.identity_layer,
-            runtime_mode=args.runtime_mode,
             env=resolved_env,
-            kraken_paper=args.kraken_paper,
         )
 
         if args.serve:

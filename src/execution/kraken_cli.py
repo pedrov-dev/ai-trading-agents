@@ -1,4 +1,4 @@
-"""Kraken CLI-style order translation with paper trading as the safe default."""
+"""Kraken CLI-style order translation for exchange-backed paper or live trading."""
 
 from __future__ import annotations
 
@@ -170,7 +170,7 @@ class KrakenCLIExecutor:
         return self.submit_order(self._coerce_request(intent))
 
     def submit_order(self, request: OrderRequest) -> ExecutionResult:
-        """Submit one order request, defaulting to a simulated paper-trade path."""
+        """Submit one order request to Kraken, using validation for paper mode."""
         command = self.build_command(request)
         self._write_audit(
             "order_requested",
@@ -602,25 +602,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     env = os.environ
-    if args.validate and not _has_private_api_credentials(env):
-        print(
-            json.dumps(
-                {
-                    "status": "validated",
-                    "validated": True,
-                    "live_submission": False,
-                    "pair": args.pair,
-                    "side": args.side,
-                    "type": args.order_type,
-                    "volume": args.volume,
-                    "client_order_id": args.clordid,
-                    "source": "local-cli-shim",
-                },
-                sort_keys=True,
-            )
-        )
-        return 0
-
     exit_code, payload, error_message = _submit_private_add_order(args=args, env=env)
     if exit_code != 0:
         print(error_message, file=sys.stderr)
