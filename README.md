@@ -39,6 +39,17 @@ The repo now includes the first implementation pieces for the official ERC-8004 
 4. Reuse the official shared addresses already included in `.env.example`
 5. Run `python src/main.py --runtime-mode sepolia --base-dir .`
 
+Optional on-chain actions are explicit:
+
+```bash
+python src/main.py --runtime-mode sepolia --base-dir . --claim-allocation
+python src/main.py --runtime-mode sepolia --base-dir . --submit-onchain
+python src/main.py --runtime-mode sepolia --base-dir . --post-checkpoints
+```
+
+When a numeric on-chain `agentId` is available, the app also persists it to `.runtime.env` so later Sepolia runs can reuse it more easily.
+The run summary now reports shared-contract status, including claim state, vault balance, and any on-chain action results.
+
 > Judging reads only from the shared contracts, so do **not** deploy private copies for leaderboard runs.
 
 ## Notes

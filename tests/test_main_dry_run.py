@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from agent.portfolio import LocalPortfolioStateProvider
+from identity.erc8004_registry import SepoliaContractsConfig
 from ingestion.prices_config import PRICE_SYMBOLS
 from ingestion.rss_config import FeedSource
 from main import build_local_demo_app
@@ -81,3 +82,46 @@ def test_local_demo_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Path
     assert (tmp_path / "artifacts" / "validation_artifacts.jsonl").exists()
     assert (tmp_path / "artifacts" / "validation_checkpoints.jsonl").exists()
     assert (tmp_path / "artifacts" / "run_summary.json").exists()
+
+
+def test_local_demo_app_persists_agent_id_env_file(tmp_path: Path) -> None:
+    app = build_local_demo_app(base_dir=tmp_path)
+    env_path = tmp_path / ".runtime.env"
+
+    app.persist_agent_id(agent_id=77, env_path=env_path)
+
+    contents = env_path.read_text(encoding="utf-8")
+    assert "AGENT_ID=77" in contents
+
+
+def test_shared_contract_status_includes_balance_and_claim_state() -> None:
+    app = build_local_demo_app(base_dir=Path("."))
+    app._shared_contract_config = SepoliaContractsConfig(agent_id=42)
+
+    class _VaultClient:
+        def has_claimed(self, agent_id: int) -> bool:
+            assert agent_id == 42
+            return True
+
+        def get_balance(self, agent_id: int) -> int:
+            assert agent_id == 42
+            return 50_000_000_000_000_000
+
+    app._vault_client = _VaultClient()
+    app._identity = app._identity.__class__(
+        agent_id="42",
+        display_name=app.identity.display_name,
+        strategy_name=app.identity.strategy_name,
+        owner=app.identity.owner,
+        exchange="sepolia",
+        wallet_address="0x0000000000000000000000000000000000000042",
+        metadata=app.identity.metadata,
+        registered_at=app.identity.registered_at,
+    )
+
+    status = app.shared_contract_status()
+
+    assert status["enabled"] is True
+    assert status["agent_id"] == "42"
+    assert status["has_claimed_allocation"] is True
+    assert status["vault_balance_wei"] == 50_000_000_000_000_000

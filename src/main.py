@@ -24,10 +24,16 @@ from execution.kraken_cli import (
 from execution.orders import ExecutionResult
 from identity.erc8004_registry import (
     AgentIdentity,
+    HackathonVaultClient,
     IdentityRegistry,
     LocalERC8004Registry,
     OnChainERC8004Registry,
+    OnChainTransactionResult,
+    ReputationRegistryClient,
+    RiskRouterClient,
+    RiskRouterIntent,
     SepoliaContractsConfig,
+    ValidationRegistryClient,
 )
 from identity.reputation import ReputationEngine, ReputationSnapshot
 from info_scheduler import InfoScheduler
@@ -248,6 +254,29 @@ class DryRunApplication:
         )
         self._runtime_mode = runtime_mode
         registry = identity_registry or LocalERC8004Registry()
+        self._shared_contract_config = (
+            registry.config if isinstance(registry, OnChainERC8004Registry) else None
+        )
+        self._vault_client = (
+            HackathonVaultClient(config=self._shared_contract_config)
+            if self._shared_contract_config is not None
+            else None
+        )
+        self._risk_router_client = (
+            RiskRouterClient(config=self._shared_contract_config)
+            if self._shared_contract_config is not None
+            else None
+        )
+        self._validation_registry_client = (
+            ValidationRegistryClient(config=self._shared_contract_config)
+            if self._shared_contract_config is not None
+            else None
+        )
+        self._reputation_registry_client = (
+            ReputationRegistryClient(config=self._shared_contract_config)
+            if self._shared_contract_config is not None
+            else None
+        )
         identity_metadata = {"mode": runtime_mode}
         if isinstance(registry, OnChainERC8004Registry):
             identity_metadata.update(
@@ -272,10 +301,220 @@ class DryRunApplication:
         ]
         self._latest_quotes: list[PriceQuote] = []
         self._handled_event_keys: set[tuple[str, str, str]] = set()
+        if self._shared_contract_config is not None and self._identity.agent_id.isdigit():
+            self.persist_agent_id(self._identity.agent_id)
 
     @property
     def identity(self) -> AgentIdentity:
         return self._identity
+
+    def persist_agent_id(
+        self,
+        agent_id: int | str | None = None,
+        *,
+        env_path: str | Path | None = None,
+    ) -> Path:
+        resolved_agent_id = str(agent_id or self._identity.agent_id).strip()
+        if not resolved_agent_id.isdigit():
+            raise ValueError("Only numeric on-chain `agentId` values can be persisted.")
+
+        target_path = (
+            Path(env_path) if env_path is not None else self.paths.base_dir / ".runtime.env"
+        )
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        existing_lines = (
+            target_path.read_text(encoding="utf-8").splitlines()
+            if target_path.exists()
+            else []
+        )
+        updated_lines: list[str] = []
+        saw_agent_id = False
+        saw_runtime_mode = False
+
+        for line in existing_lines:
+            stripped = line.strip()
+            if stripped.startswith("AGENT_ID="):
+                updated_lines.append(f"AGENT_ID={resolved_agent_id}")
+                saw_agent_id = True
+            elif stripped.startswith("TRADING_RUNTIME_MODE=") and self._runtime_mode == "sepolia":
+                updated_lines.append("TRADING_RUNTIME_MODE=sepolia")
+                saw_runtime_mode = True
+            else:
+                updated_lines.append(line)
+
+        if not saw_agent_id:
+            updated_lines.append(f"AGENT_ID={resolved_agent_id}")
+        if self._runtime_mode == "sepolia" and not saw_runtime_mode:
+            updated_lines.append("TRADING_RUNTIME_MODE=sepolia")
+
+        target_path.write_text("\n".join(updated_lines).rstrip() + "\n", encoding="utf-8")
+        os.environ["AGENT_ID"] = resolved_agent_id
+        return target_path
+
+    def shared_contract_status(self) -> dict[str, Any]:
+        if self._shared_contract_config is None:
+            return {
+                "enabled": False,
+                "runtime_mode": self._runtime_mode,
+            }
+
+        status: dict[str, Any] = {
+            "enabled": True,
+            "runtime_mode": self._runtime_mode,
+            "chain_id": self._shared_contract_config.chain_id,
+            "agent_id": self._identity.agent_id,
+            "agent_registry_address": self._shared_contract_config.agent_registry_address,
+            "hackathon_vault_address": self._shared_contract_config.hackathon_vault_address,
+            "risk_router_address": self._shared_contract_config.risk_router_address,
+            "validation_registry_address": self._shared_contract_config.validation_registry_address,
+            "reputation_registry_address": self._shared_contract_config.reputation_registry_address,
+            "transaction_ready": self._shared_contract_config.is_ready_for_transactions,
+            "agent_id_env_path": str(self.paths.base_dir / ".runtime.env"),
+            "has_claimed_allocation": None,
+            "vault_balance_wei": None,
+        }
+
+        resolved_agent_id = self._try_resolved_agent_id_for_chain()
+        if resolved_agent_id is None or self._vault_client is None:
+            return status
+
+        try:
+            status["has_claimed_allocation"] = self._vault_client.has_claimed(
+                resolved_agent_id
+            )
+            status["vault_balance_wei"] = self._vault_client.get_balance(resolved_agent_id)
+        except Exception as exc:
+            status["vault_error"] = str(exc)
+
+        return status
+
+    def claim_sandbox_allocation(self) -> OnChainTransactionResult:
+        if self._vault_client is None:
+            raise RuntimeError("Shared Sepolia mode is not enabled for this app instance.")
+        return self._vault_client.claim_allocation(self._resolved_agent_id_for_chain())
+
+    def submit_trade_intent_onchain(
+        self,
+        intent: TradeIntent,
+        *,
+        max_slippage_bps: int = 100,
+        ttl_seconds: int = 300,
+    ) -> OnChainTransactionResult:
+        if self._risk_router_client is None:
+            raise RuntimeError("Shared Sepolia mode is not enabled for this app instance.")
+        if self.identity.wallet_address is None:
+            raise RuntimeError(
+                "The registered agent is missing a wallet address for RiskRouter signing."
+            )
+
+        agent_id = self._resolved_agent_id_for_chain()
+        nonce = self._risk_router_client.get_intent_nonce(agent_id)
+        deadline = int(intent.generated_at.timestamp()) + ttl_seconds
+        router_intent = RiskRouterIntent.from_trade_intent(
+            agent_id=agent_id,
+            agent_wallet=self.identity.wallet_address,
+            trade_intent=intent,
+            nonce=nonce,
+            deadline=deadline,
+            max_slippage_bps=max_slippage_bps,
+        )
+        simulation = self._risk_router_client.simulate_trade_intent(router_intent)
+        if not simulation.approved:
+            return OnChainTransactionResult(
+                tx_hash="not-submitted",
+                status="rejected",
+                details={
+                    "agent_id": agent_id,
+                    "pair": router_intent.pair,
+                    "reason": simulation.reason,
+                },
+            )
+        return self._risk_router_client.submit_trade_intent(router_intent)
+
+    def post_checkpoint_onchain(
+        self,
+        checkpoint: ValidationCheckpoint,
+        *,
+        score: int = 85,
+    ) -> OnChainTransactionResult:
+        if self._validation_registry_client is None:
+            raise RuntimeError("Shared Sepolia mode is not enabled for this app instance.")
+        return self._validation_registry_client.post_checkpoint(
+            checkpoint,
+            agent_id=self._resolved_agent_id_for_chain(),
+            score=score,
+        )
+
+    def get_onchain_reputation_score(self) -> int | None:
+        if self._reputation_registry_client is None:
+            return None
+        return self._reputation_registry_client.get_average_score(
+            self._resolved_agent_id_for_chain()
+        )
+
+    def run_shared_contract_actions(
+        self,
+        *,
+        trade_intents: tuple[TradeIntent, ...],
+        checkpoints: tuple[ValidationCheckpoint, ...],
+        claim_allocation: bool = False,
+        submit_trade_intents: bool = False,
+        post_checkpoints: bool = False,
+    ) -> dict[str, Any]:
+        summary: dict[str, Any] = self.shared_contract_status()
+        summary.update(
+            {
+                "claim_allocation": None,
+                "trade_submissions": [],
+                "checkpoint_posts": [],
+                "reputation_score": None,
+            }
+        )
+
+        if self._shared_contract_config is None:
+            return summary
+
+        persisted_path = None
+        resolved_agent_id = self._try_resolved_agent_id_for_chain()
+        if resolved_agent_id is not None:
+            persisted_path = self.persist_agent_id(resolved_agent_id)
+            summary["persisted_agent_env_path"] = str(persisted_path)
+
+        if claim_allocation:
+            summary["claim_allocation"] = self.claim_sandbox_allocation().__dict__
+
+        if submit_trade_intents:
+            summary["trade_submissions"] = [
+                self.submit_trade_intent_onchain(intent).__dict__
+                for intent in trade_intents
+            ]
+
+        if post_checkpoints:
+            summary["checkpoint_posts"] = [
+                self.post_checkpoint_onchain(checkpoint).__dict__
+                for checkpoint in checkpoints
+            ]
+
+        try:
+            summary["reputation_score"] = self.get_onchain_reputation_score()
+        except Exception as exc:
+            summary["reputation_error"] = str(exc)
+
+        return summary
+
+    def _try_resolved_agent_id_for_chain(self) -> int | None:
+        if self._identity.agent_id.isdigit():
+            return int(self._identity.agent_id)
+        return None
+
+    def _resolved_agent_id_for_chain(self) -> int:
+        resolved = self._try_resolved_agent_id_for_chain()
+        if resolved is not None:
+            return resolved
+        raise RuntimeError(
+            "The current identity does not have a numeric on-chain `agentId` yet."
+        )
 
     def wire_scheduler(
         self,
@@ -523,6 +762,21 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         default=os.environ.get("TRADING_RUNTIME_MODE", "local"),
         help="Execution mode: keep local dry-run defaults or use shared Sepolia contracts.",
     )
+    parser.add_argument(
+        "--claim-allocation",
+        action="store_true",
+        help="Call `HackathonVault.claimAllocation(agentId)` after the local run completes.",
+    )
+    parser.add_argument(
+        "--submit-onchain",
+        action="store_true",
+        help="Simulate and submit generated trade intents through the shared `RiskRouter`.",
+    )
+    parser.add_argument(
+        "--post-checkpoints",
+        action="store_true",
+        help="Post generated checkpoints to the shared `ValidationRegistry`.",
+    )
     return parser
 
 
@@ -535,7 +789,17 @@ def main() -> int:
         env=os.environ,
     )
     result = app.run_cycle(feed_group=args.feed_group)
-    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    payload = result.to_dict()
+    payload["runtime_mode"] = args.runtime_mode
+    if args.runtime_mode == "sepolia":
+        payload["shared_contracts"] = app.run_shared_contract_actions(
+            trade_intents=result.trade_intents,
+            checkpoints=result.checkpoints,
+            claim_allocation=args.claim_allocation,
+            submit_trade_intents=args.submit_onchain,
+            post_checkpoints=args.post_checkpoints,
+        )
+    print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -22,6 +22,47 @@ _SHARED_AGENT_REGISTRY_ABI = [
         "operatorWallet, address agentWallet, string name, string description, "
         "string[] capabilities, uint256 registeredAt, bool active))"
     ),
+]
+
+_SHARED_HACKATHON_VAULT_ABI = [
+    "function claimAllocation(uint256 agentId) external",
+    "function getBalance(uint256 agentId) external view returns (uint256)",
+    "function hasClaimed(uint256 agentId) external view returns (bool)",
+]
+
+_SHARED_RISK_ROUTER_ABI = [
+    (
+        "function submitTradeIntent((uint256 agentId, address agentWallet, string "
+        "pair, string action, uint256 amountUsdScaled, uint256 "
+        "maxSlippageBps, uint256 nonce, uint256 deadline) intent, bytes "
+        "signature) external"
+    ),
+    (
+        "function simulateIntent((uint256 agentId, address agentWallet, string "
+        "pair, string action, uint256 amountUsdScaled, uint256 "
+        "maxSlippageBps, uint256 nonce, uint256 deadline) intent) external "
+        "view returns (bool valid, string reason)"
+    ),
+    "function getIntentNonce(uint256 agentId) external view returns (uint256)",
+]
+
+_SHARED_VALIDATION_REGISTRY_ABI = [
+    (
+        "function postEIP712Attestation(uint256 agentId, bytes32 checkpointHash, "
+        "uint8 score, string notes) external"
+    ),
+    (
+        "function getAverageValidationScore(uint256 agentId) external view returns "
+        "(uint256)"
+    ),
+]
+
+_SHARED_REPUTATION_REGISTRY_ABI = [
+    (
+        "function submitFeedback(uint256 agentId, uint8 score, bytes32 outcomeRef, "
+        "string comment, uint8 feedbackType) external"
+    ),
+    "function getAverageScore(uint256 agentId) external view returns (uint256)",
 ]
 
 _SYMBOL_TO_ROUTER_PAIR: dict[str, str] = {
@@ -271,6 +312,352 @@ class RiskRouterIntent:
                 "deadline": self.deadline,
             },
         }
+
+
+@dataclass(frozen=True)
+class OnChainTransactionResult:
+    """Common transaction receipt summary for shared Sepolia contract calls."""
+
+    tx_hash: str
+    status: str = "submitted"
+    block_number: int | None = None
+    gas_used: int | None = None
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RiskRouterSimulation:
+    """Dry-run validation result returned by the shared RiskRouter."""
+
+    approved: bool
+    reason: str = ""
+
+
+class _SharedSepoliaClientBase:
+    """Common web3 setup and transaction-sending helpers for shared contracts."""
+
+    def __init__(
+        self,
+        *,
+        config: SepoliaContractsConfig,
+        contract_address: str,
+        abi: list[str],
+        contract: Any | None = None,
+        transaction_sender: Callable[[Any], OnChainTransactionResult] | None = None,
+    ) -> None:
+        self._config = config
+        self._contract_address = contract_address
+        self._abi = abi
+        self._contract = contract
+        self._web3: Any | None = None
+        self._transaction_sender = transaction_sender
+
+    def _resolve_contract(self) -> Any:
+        if self._contract is not None:
+            return self._contract
+        if not self._contract_address:
+            raise RuntimeError("Missing shared-contract address for the selected client.")
+
+        try:
+            from web3 import Web3
+        except ImportError as exc:
+            raise RuntimeError(
+                "Install `web3` to enable shared Sepolia contract interactions."
+            ) from exc
+
+        if self._web3 is None:
+            web3 = Web3(Web3.HTTPProvider(self._config.rpc_url))
+            if not web3.is_connected():
+                raise RuntimeError(
+                    f"Unable to connect to Sepolia RPC at {self._config.rpc_url}."
+                )
+            self._web3 = web3
+
+        self._contract = self._web3.eth.contract(
+            address=Web3.to_checksum_address(self._contract_address),
+            abi=self._abi,
+        )
+        return self._contract
+
+    def _send_transaction(self, contract_call: Any) -> OnChainTransactionResult:
+        if self._transaction_sender is not None:
+            return self._transaction_sender(contract_call)
+
+        contract = self._resolve_contract()
+        del contract
+        if self._web3 is None or self._config.private_key is None:
+            raise RuntimeError(
+                "Sepolia transaction signing requires a configured `PRIVATE_KEY`."
+            )
+
+        account = self._web3.eth.account.from_key(self._config.private_key)
+        transaction = contract_call.build_transaction(
+            {
+                "from": account.address,
+                "nonce": self._web3.eth.get_transaction_count(account.address),
+                "chainId": self._config.chain_id,
+            }
+        )
+        signed = self._web3.eth.account.sign_transaction(
+            transaction,
+            private_key=self._config.private_key,
+        )
+        raw_transaction = getattr(signed, "raw_transaction", None)
+        if raw_transaction is None:
+            raw_transaction = signed.rawTransaction
+        tx_hash = self._web3.eth.send_raw_transaction(raw_transaction)
+        receipt = self._web3.eth.wait_for_transaction_receipt(tx_hash)
+
+        return OnChainTransactionResult(
+            tx_hash=_tx_hash_as_hex(tx_hash),
+            status="confirmed" if int(getattr(receipt, "status", 1)) == 1 else "reverted",
+            block_number=getattr(receipt, "blockNumber", None),
+            gas_used=getattr(receipt, "gasUsed", None),
+        )
+
+
+class HackathonVaultClient(_SharedSepoliaClientBase):
+    """Client wrapper for claiming and inspecting shared hackathon sandbox capital."""
+
+    def __init__(
+        self,
+        *,
+        config: SepoliaContractsConfig,
+        contract: Any | None = None,
+        transaction_sender: Callable[[Any], OnChainTransactionResult] | None = None,
+    ) -> None:
+        super().__init__(
+            config=config,
+            contract_address=config.hackathon_vault_address,
+            abi=_SHARED_HACKATHON_VAULT_ABI,
+            contract=contract,
+            transaction_sender=transaction_sender,
+        )
+
+    def claim_allocation(self, agent_id: int | None = None) -> OnChainTransactionResult:
+        resolved_agent_id = _resolve_required_agent_id(agent_id, self._config.agent_id)
+        contract = self._resolve_contract()
+        result = self._send_transaction(contract.functions.claimAllocation(resolved_agent_id))
+        details = dict(result.details)
+        details["agent_id"] = resolved_agent_id
+        try:
+            details["balance_wei"] = self.get_balance(resolved_agent_id)
+        except Exception:
+            pass
+        return OnChainTransactionResult(
+            tx_hash=result.tx_hash,
+            status=result.status,
+            block_number=result.block_number,
+            gas_used=result.gas_used,
+            details=details,
+        )
+
+    def get_balance(self, agent_id: int | None = None) -> int:
+        resolved_agent_id = _resolve_required_agent_id(agent_id, self._config.agent_id)
+        contract = self._resolve_contract()
+        return int(contract.functions.getBalance(resolved_agent_id).call())
+
+    def has_claimed(self, agent_id: int | None = None) -> bool:
+        resolved_agent_id = _resolve_required_agent_id(agent_id, self._config.agent_id)
+        contract = self._resolve_contract()
+        return bool(contract.functions.hasClaimed(resolved_agent_id).call())
+
+
+class RiskRouterClient(_SharedSepoliaClientBase):
+    """Client wrapper for simulating, signing, and submitting trade intents."""
+
+    def __init__(
+        self,
+        *,
+        config: SepoliaContractsConfig,
+        contract: Any | None = None,
+        signer: Callable[[RiskRouterIntent], bytes] | None = None,
+        transaction_sender: Callable[[Any], OnChainTransactionResult] | None = None,
+    ) -> None:
+        super().__init__(
+            config=config,
+            contract_address=config.risk_router_address,
+            abi=_SHARED_RISK_ROUTER_ABI,
+            contract=contract,
+            transaction_sender=transaction_sender,
+        )
+        self._signer = signer
+
+    def get_intent_nonce(self, agent_id: int | None = None) -> int:
+        resolved_agent_id = _resolve_required_agent_id(agent_id, self._config.agent_id)
+        contract = self._resolve_contract()
+        return int(contract.functions.getIntentNonce(resolved_agent_id).call())
+
+    def simulate_trade_intent(self, intent: RiskRouterIntent) -> RiskRouterSimulation:
+        contract = self._resolve_contract()
+        approved, reason = contract.functions.simulateIntent(intent.as_tuple()).call()
+        return RiskRouterSimulation(approved=bool(approved), reason=str(reason))
+
+    def sign_trade_intent(self, intent: RiskRouterIntent) -> bytes:
+        if self._signer is not None:
+            return self._signer(intent)
+        if self._config.agent_wallet_private_key is None:
+            raise RuntimeError(
+                "RiskRouter signing requires `AGENT_WALLET_PRIVATE_KEY` in the environment."
+            )
+
+        try:
+            from eth_account import Account
+        except ImportError as exc:
+            raise RuntimeError(
+                "Install `eth-account` to sign shared RiskRouter intents."
+            ) from exc
+
+        structured_data = intent.to_eip712_structured_data(
+            chain_id=self._config.chain_id,
+            verifying_contract=self._config.risk_router_address,
+        )
+        signed = Account.sign_typed_data(
+            self._config.agent_wallet_private_key,
+            full_message=structured_data,
+        )
+        signature = getattr(signed, "signature", b"")
+        if isinstance(signature, bytes):
+            return signature
+        hex_signature = str(signature)
+        if hex_signature.startswith("0x"):
+            hex_signature = hex_signature[2:]
+        return bytes.fromhex(hex_signature)
+
+    def submit_trade_intent(
+        self,
+        intent: RiskRouterIntent,
+        *,
+        signature: bytes | None = None,
+    ) -> OnChainTransactionResult:
+        contract = self._resolve_contract()
+        resolved_signature = signature or self.sign_trade_intent(intent)
+        result = self._send_transaction(
+            contract.functions.submitTradeIntent(intent.as_tuple(), resolved_signature)
+        )
+        details = dict(result.details)
+        details.update(
+            {
+                "agent_id": intent.agent_id,
+                "pair": intent.pair,
+                "action": intent.action,
+                "amount_usd_scaled": intent.amount_usd_scaled,
+            }
+        )
+        return OnChainTransactionResult(
+            tx_hash=result.tx_hash,
+            status=result.status,
+            block_number=result.block_number,
+            gas_used=result.gas_used,
+            details=details,
+        )
+
+
+class ValidationRegistryClient(_SharedSepoliaClientBase):
+    """Client wrapper for posting and reading checkpoint attestations."""
+
+    def __init__(
+        self,
+        *,
+        config: SepoliaContractsConfig,
+        contract: Any | None = None,
+        transaction_sender: Callable[[Any], OnChainTransactionResult] | None = None,
+    ) -> None:
+        super().__init__(
+            config=config,
+            contract_address=config.validation_registry_address,
+            abi=_SHARED_VALIDATION_REGISTRY_ABI,
+            contract=contract,
+            transaction_sender=transaction_sender,
+        )
+
+    @staticmethod
+    def build_checkpoint_hash(checkpoint: Mapping[str, Any] | Any) -> str:
+        if hasattr(checkpoint, "to_dict"):
+            payload = checkpoint.to_dict()
+        else:
+            payload = dict(checkpoint)
+        canonical_json = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        try:
+            from web3 import Web3
+
+            return Web3.keccak(text=canonical_json).hex()
+        except ImportError:
+            return f"0x{hashlib.sha256(canonical_json.encode('utf-8')).hexdigest()}"
+
+    def post_checkpoint(
+        self,
+        checkpoint: Mapping[str, Any] | Any,
+        *,
+        agent_id: int | None = None,
+        score: int = 85,
+        notes: str | None = None,
+    ) -> OnChainTransactionResult:
+        resolved_agent_id = _resolve_required_agent_id(
+            agent_id if agent_id is not None else getattr(checkpoint, "agent_id", None),
+            self._config.agent_id,
+        )
+        contract = self._resolve_contract()
+        checkpoint_hash = self.build_checkpoint_hash(checkpoint)
+        note_text = notes or _checkpoint_note_text(checkpoint)
+        bounded_score = max(0, min(int(score), 100))
+        result = self._send_transaction(
+            contract.functions.postEIP712Attestation(
+                resolved_agent_id,
+                checkpoint_hash,
+                bounded_score,
+                note_text,
+            )
+        )
+        details = dict(result.details)
+        details.update(
+            {
+                "agent_id": resolved_agent_id,
+                "checkpoint_hash": checkpoint_hash,
+                "score": bounded_score,
+            }
+        )
+        return OnChainTransactionResult(
+            tx_hash=result.tx_hash,
+            status=result.status,
+            block_number=result.block_number,
+            gas_used=result.gas_used,
+            details=details,
+        )
+
+    def get_average_validation_score(self, agent_id: int | None = None) -> int:
+        resolved_agent_id = _resolve_required_agent_id(agent_id, self._config.agent_id)
+        contract = self._resolve_contract()
+        return int(contract.functions.getAverageValidationScore(resolved_agent_id).call())
+
+
+class ReputationRegistryClient(_SharedSepoliaClientBase):
+    """Read helper for leaderboard-facing reputation scores."""
+
+    def __init__(
+        self,
+        *,
+        config: SepoliaContractsConfig,
+        contract: Any | None = None,
+        transaction_sender: Callable[[Any], OnChainTransactionResult] | None = None,
+    ) -> None:
+        super().__init__(
+            config=config,
+            contract_address=config.reputation_registry_address,
+            abi=_SHARED_REPUTATION_REGISTRY_ABI,
+            contract=contract,
+            transaction_sender=transaction_sender,
+        )
+
+    def get_average_score(self, agent_id: int | None = None) -> int:
+        resolved_agent_id = _resolve_required_agent_id(agent_id, self._config.agent_id)
+        contract = self._resolve_contract()
+        return int(contract.functions.getAverageScore(resolved_agent_id).call())
 
 
 class IdentityRegistry(Protocol):
@@ -536,6 +923,43 @@ class OnChainERC8004Registry:
 
         onchain_agent_id = int(logs[0]["args"]["agentId"])
         return tx_hash.hex(), onchain_agent_id, resolved_wallet
+
+
+def _resolve_required_agent_id(
+    agent_id: str | int | None,
+    fallback_agent_id: int | None,
+) -> int:
+    resolved = _coerce_onchain_agent_id(agent_id)
+    if resolved is not None:
+        return resolved
+    if fallback_agent_id is not None:
+        return fallback_agent_id
+    raise RuntimeError(
+        "No numeric `agentId` is available yet. Register on `AgentRegistry` "
+        "first or set `AGENT_ID`."
+    )
+
+
+def _checkpoint_note_text(checkpoint: Mapping[str, Any] | Any) -> str:
+    if hasattr(checkpoint, "notes"):
+        notes = tuple(str(note) for note in getattr(checkpoint, "notes", ()))
+        if notes:
+            return " | ".join(notes)
+    if isinstance(checkpoint, Mapping):
+        metric_name = str(checkpoint.get("metric_name", "checkpoint"))
+        metric_value = checkpoint.get("metric_value", "")
+        return f"{metric_name}={metric_value}"
+    return "Local validation checkpoint submitted from the trading agent."
+
+
+def _tx_hash_as_hex(tx_hash: Any) -> str:
+    if isinstance(tx_hash, bytes):
+        return f"0x{tx_hash.hex()}"
+    if hasattr(tx_hash, "hex"):
+        value = tx_hash.hex()
+        return value if str(value).startswith("0x") else f"0x{value}"
+    value = str(tx_hash)
+    return value if value.startswith("0x") else f"0x{value}"
 
 
 def _optional_env_value(env: Mapping[str, str], key: str) -> str | None:
