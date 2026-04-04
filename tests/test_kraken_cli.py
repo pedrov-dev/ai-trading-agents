@@ -138,7 +138,8 @@ def test_submit_trade_intent_validate_only_hits_kraken_without_live_fill(tmp_pat
     assert len(calls) == 1
     assert "--validate" in calls[0]
     assert result.status == OrderStatus.VALIDATED
-    assert result.fill is None
+    assert result.fill is not None
+    assert result.fill.status == OrderStatus.SIMULATED
     assert result.is_successful is True
 
 

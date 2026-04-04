@@ -4,6 +4,8 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Protocol
 
+from detection.event_detection import DetectedEvent
+
 
 class EventDetectionRepository(Protocol):
     """Persist detected events from raw text."""
@@ -20,12 +22,47 @@ class EventDetectionRepository(Protocol):
     ) -> None:
         ...
 
+    def list_detected_events(self) -> tuple[DetectedEvent, ...]:
+        ...
+
 
 class PostgresEventDetectionRepository:
     """DB-API based repository for detected events."""
 
     def __init__(self, connection_factory: Callable[[], Any]) -> None:
         self._connection_factory = connection_factory
+
+    def list_detected_events(self) -> tuple[DetectedEvent, ...]:
+        query = """
+        SELECT raw_event_id::text,
+               event_type,
+               rule_name,
+               confidence,
+               detected_at,
+               metadata
+        FROM detected_events
+        ORDER BY detected_at ASC
+        """
+        with self._connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(query)
+                rows = cursor.fetchall()
+
+        events: list[DetectedEvent] = []
+        for row in rows:
+            metadata = row[5] if isinstance(row[5], dict) else {}
+            matched_text = metadata.get("matched_text") if metadata else None
+            events.append(
+                DetectedEvent(
+                    raw_event_id=str(row[0]),
+                    event_type=str(row[1]),
+                    rule_name=str(row[2]),
+                    confidence=float(row[3]),
+                    detected_at=row[4],
+                    matched_text=str(matched_text) if matched_text is not None else None,
+                )
+            )
+        return tuple(events)
 
     def insert_detected_event(
         self,

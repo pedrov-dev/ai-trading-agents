@@ -220,6 +220,13 @@ class KrakenCLIExecutor:
                 attempts.append(attempt)
                 fill = None
                 event_name = "order_validated" if validation_only else "order_submitted"
+                if validation_only:
+                    fill = OrderFill(
+                        status=OrderStatus.SIMULATED,
+                        filled_quantity=request.quantity,
+                        average_price=request.current_price,
+                        filled_at=finished_at,
+                    )
                 if status == OrderStatus.FILLED:
                     fill = OrderFill(
                         status=OrderStatus.FILLED,

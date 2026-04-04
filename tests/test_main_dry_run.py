@@ -6,11 +6,13 @@ import pytest
 from agent.portfolio import LocalPortfolioStateProvider
 from agent.risk import RiskCheckResult, RiskViolation
 from agent.signals import TradeIntent
+from detection.event_detection_postgres import PostgresEventDetectionRepository
 from execution.kraken_cli import CommandRunResult, KrakenCLIConfig
 from identity.erc8004_registry import SepoliaContractsConfig
 from ingestion.prices_config import PRICE_SYMBOLS
 from ingestion.rss_config import FeedSource
 from main import build_local_demo_app, build_runtime_preflight, validate_runtime_requirements
+from storage.raw_postgres import PostgresIngestionRunsRepository, PostgresRawEventsRepository
 
 BTC_SYMBOL = next(symbol for symbol in PRICE_SYMBOLS if symbol.symbol_id == "btc_usd")
 
@@ -108,7 +110,9 @@ def test_kraken_paper_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Pa
     assert result.artifact_count >= 4
     assert result.checkpoint_count >= 4
     assert result.audit_summary.total_events >= 2
-    assert result.portfolio.open_position_count() == 0
+    assert result.execution_results[0].fill is not None
+    assert result.portfolio.open_position_count() == 1
+    assert result.portfolio.positions[0].symbol_id == "btc_usd"
 
     assert (tmp_path / "artifacts" / "orders_audit.jsonl").exists()
     assert (tmp_path / "artifacts" / "validation_artifacts.jsonl").exists()
@@ -193,6 +197,24 @@ def test_build_local_demo_app_defaults_to_kraken_paper_mode(tmp_path: Path) -> N
     assert app._executor._config.validate_only is True
     assert app._executor._config.timeout_seconds == 21
     assert app._executor._config.audit_log_path == tmp_path / "artifacts" / "orders_audit.jsonl"
+
+
+def test_build_local_demo_app_uses_postgres_repositories_when_database_configured(
+    tmp_path: Path,
+) -> None:
+    app = build_local_demo_app(
+        base_dir=tmp_path,
+        env={
+            "POSTGRES_ENABLED": "true",
+            "DATABASE_URL": "postgresql://demo:demo@localhost:5432/ai_trading",
+            "KRAKEN_API_KEY": "demo-key",
+            "KRAKEN_API_SECRET": "demo-secret",
+        },
+    )
+
+    assert isinstance(app._runs_repository, PostgresIngestionRunsRepository)
+    assert isinstance(app._raw_events_repository, PostgresRawEventsRepository)
+    assert isinstance(app._event_repository, PostgresEventDetectionRepository)
 
 
 def test_build_local_demo_app_supports_kraken_live_mode(tmp_path: Path) -> None:

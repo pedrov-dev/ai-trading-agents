@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Any
 
@@ -215,6 +215,77 @@ class PostgresRawEventsRepository:
                 }
             )
         return events
+
+
+def postgres_connection_factory_from_env(
+    env: Mapping[str, str] | None = None,
+) -> Callable[[], Any] | None:
+    """Build a lazy Psycopg connection factory from common env var shapes."""
+    source = env or {}
+    enabled = str(source.get("POSTGRES_ENABLED", "")).strip().lower()
+    storage_backend = str(source.get("STORAGE_BACKEND", "")).strip().lower()
+    if enabled in {"0", "false", "no", "off"}:
+        return None
+    if enabled not in {"1", "true", "yes", "on"} and storage_backend != "postgres":
+        return None
+
+    database_url = str(
+        source.get("DATABASE_URL") or source.get("POSTGRES_DSN") or ""
+    ).strip()
+    if database_url:
+        def _connect_with_dsn() -> Any:
+            import psycopg
+
+            return psycopg.connect(database_url)
+
+        return _connect_with_dsn
+
+    host = str(source.get("POSTGRES_HOST") or source.get("PGHOST") or "").strip()
+    database = str(
+        source.get("POSTGRES_DB")
+        or source.get("POSTGRES_DATABASE")
+        or source.get("PGDATABASE")
+        or ""
+    ).strip()
+    user = str(source.get("POSTGRES_USER") or source.get("PGUSER") or "").strip()
+    password = str(
+        source.get("POSTGRES_PASSWORD") or source.get("PGPASSWORD") or ""
+    ).strip()
+    if not host or not database or not user:
+        return None
+
+    connect_kwargs: dict[str, Any] = {
+        "host": host,
+        "dbname": database,
+        "user": user,
+    }
+    port = str(source.get("POSTGRES_PORT") or source.get("PGPORT") or "").strip()
+    if port:
+        connect_kwargs["port"] = int(port)
+    if password:
+        connect_kwargs["password"] = password
+    sslmode = str(source.get("POSTGRES_SSLMODE") or source.get("PGSSLMODE") or "").strip()
+    if sslmode:
+        connect_kwargs["sslmode"] = sslmode
+
+    def _connect_with_kwargs() -> Any:
+        import psycopg
+
+        return psycopg.connect(**connect_kwargs)
+
+    return _connect_with_kwargs
+
+
+def probe_postgres_connection(connection_factory: Callable[[], Any]) -> tuple[bool, str | None]:
+    """Attempt a trivial read against Postgres to verify connectivity."""
+    try:
+        with connection_factory() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+        return True, None
+    except Exception as exc:  # pragma: no cover - error text depends on environment
+        return False, str(exc)
 
 
 def _dumps_json(value: dict[str, Any]) -> str:

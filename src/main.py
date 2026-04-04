@@ -16,6 +16,7 @@ from agent.portfolio import LocalPortfolioStateProvider, PortfolioSnapshot
 from agent.signals import TradeIntent
 from agent.strategy import SimpleEventDrivenStrategy
 from detection.event_detection import DetectedEvent, RuleBasedEventDetector
+from detection.event_detection_postgres import PostgresEventDetectionRepository
 from detection.event_detection_service import EventDetectionService
 from execution.kraken_cli import (
     DEFAULT_AUDIT_LOG_PATH,
@@ -57,6 +58,12 @@ from storage.raw_ingestion import (
     IngestionRunResult,
     PricesRawIngestionPipeline,
     RSSRawIngestionPipeline,
+)
+from storage.raw_postgres import (
+    PostgresIngestionRunsRepository,
+    PostgresRawEventsRepository,
+    postgres_connection_factory_from_env,
+    probe_postgres_connection,
 )
 from validation.artifacts import ValidationArtifact
 from validation.checkpoints import ValidationCheckpoint, build_checkpoints
@@ -224,8 +231,21 @@ class TradingApplication:
     ) -> None:
         self.paths = paths
         self._scheduler = scheduler or InfoScheduler()
-        self._runs_repository = InMemoryIngestionRunsRepository()
-        self._raw_events_repository = InMemoryRawEventsRepository()
+        resolved_runtime_env = {
+            key: str(value) for key, value in (runtime_env or {}).items()
+        }
+        connection_factory = postgres_connection_factory_from_env(resolved_runtime_env)
+        self._storage_backend = "postgres" if connection_factory is not None else "local"
+        self._runs_repository = (
+            PostgresIngestionRunsRepository(connection_factory)
+            if connection_factory is not None
+            else InMemoryIngestionRunsRepository()
+        )
+        self._raw_events_repository = (
+            PostgresRawEventsRepository(connection_factory)
+            if connection_factory is not None
+            else InMemoryRawEventsRepository()
+        )
         self._object_store = LocalFileObjectStore(paths.raw_payload_dir)
         self._rss_pipeline = RSSRawIngestionPipeline(
             runs_repository=self._runs_repository,
@@ -245,7 +265,11 @@ class TradingApplication:
             symbols=symbols,
             http_get=http_get,
         )
-        self._event_repository = InMemoryEventDetectionRepository()
+        self._event_repository = (
+            PostgresEventDetectionRepository(connection_factory)
+            if connection_factory is not None
+            else InMemoryEventDetectionRepository()
+        )
         self._detection_service = EventDetectionService(
             detector=RuleBasedEventDetector(),
             raw_events_repository=self._raw_events_repository,
@@ -349,6 +373,8 @@ class TradingApplication:
             "will_submit_real_orders": (
                 config.live_enabled and not config.dry_run and not config.validate_only
             ),
+            "storage_backend": self._storage_backend,
+            "object_store_backend": "local_files",
         }
 
     def _initialize_identity(self, registry: IdentityRegistry) -> AgentIdentity:
@@ -1068,6 +1094,14 @@ def build_runtime_preflight(
         "yes",
         "on",
     }
+    postgres_connection_factory = postgres_connection_factory_from_env(env_map)
+    postgres_configured = postgres_connection_factory is not None
+    postgres_reachable = None
+    postgres_error = None
+    if postgres_connection_factory is not None:
+        postgres_reachable, postgres_error = probe_postgres_connection(postgres_connection_factory)
+        if not postgres_reachable and postgres_error:
+            issues.append(f"Postgres is configured but not reachable: {postgres_error}")
 
     if execution_config.dry_run or not execution_config.live_enabled:
         issues.append(
@@ -1127,12 +1161,17 @@ def build_runtime_preflight(
             "live_connected_paper_trading": live_connected_paper,
             "will_submit_real_orders": will_submit_real_orders,
             "sepolia_missing_required_values": sepolia_missing,
+            "postgres_configured": postgres_configured,
+            "postgres_reachable": postgres_reachable,
         },
         "execution_config": {
             "kraken_cli_executable": execution_config.executable,
             "kraken_dry_run": execution_config.dry_run,
             "kraken_live_enabled": execution_config.live_enabled,
             "kraken_validate_only": execution_config.validate_only,
+            "storage_backend": "postgres" if postgres_configured else "local",
+            "object_store_backend": "local_files",
+            "postgres_error": postgres_error,
         },
         "issues": issues,
     }
