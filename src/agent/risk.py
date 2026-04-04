@@ -65,16 +65,21 @@ class RiskManager:
         portfolio: PortfolioSnapshot,
         proposed_notional: float,
         now: datetime | None = None,
+        reduce_only: bool = False,
     ) -> RiskCheckResult:
         del signal
         checked_at = now or datetime.now(UTC)
         max_position_notional = portfolio.total_equity * self._config.max_position_fraction
-        allowed_notional = round(max(0.0, min(proposed_notional, max_position_notional)), 2)
+        capped_notional = min(proposed_notional, max_position_notional)
+        allowed_notional = round(
+            max(0.0, proposed_notional if reduce_only else capped_notional),
+            2,
+        )
 
         violations: list[RiskViolation] = []
         notes: list[str] = []
 
-        if portfolio.total_equity <= 0:
+        if not reduce_only and portfolio.total_equity <= 0:
             violations.append(
                 RiskViolation(
                     code="invalid_equity",
@@ -82,34 +87,38 @@ class RiskManager:
                 )
             )
 
-        daily_loss_limit = portfolio.total_equity * self._config.max_daily_loss_fraction
-        if portfolio.realized_pnl_today <= -daily_loss_limit:
-            violations.append(
-                RiskViolation(
-                    code="max_daily_loss",
-                    message="Daily loss limit reached; block new entries until the next session.",
-                )
-            )
-
-        if portfolio.open_position_count() >= self._config.max_concurrent_positions:
-            violations.append(
-                RiskViolation(
-                    code="max_concurrent_positions",
-                    message="Maximum concurrent positions already open.",
-                )
-            )
-
-        if portfolio.consecutive_losses > 0 and portfolio.last_loss_at is not None:
-            cooldown_until = portfolio.last_loss_at + timedelta(
-                minutes=self._config.cooldown_minutes_after_loss
-            )
-            if checked_at < cooldown_until:
+        if not reduce_only:
+            daily_loss_limit = portfolio.total_equity * self._config.max_daily_loss_fraction
+            if portfolio.realized_pnl_today <= -daily_loss_limit:
                 violations.append(
                     RiskViolation(
-                        code="cooldown_after_loss",
-                        message="Cooldown after recent losses is still active.",
+                        code="max_daily_loss",
+                        message=(
+                            "Daily loss limit reached; block new entries until "
+                            "the next session."
+                        ),
                     )
                 )
+
+            if portfolio.open_position_count() >= self._config.max_concurrent_positions:
+                violations.append(
+                    RiskViolation(
+                        code="max_concurrent_positions",
+                        message="Maximum concurrent positions already open.",
+                    )
+                )
+
+            if portfolio.consecutive_losses > 0 and portfolio.last_loss_at is not None:
+                cooldown_until = portfolio.last_loss_at + timedelta(
+                    minutes=self._config.cooldown_minutes_after_loss
+                )
+                if checked_at < cooldown_until:
+                    violations.append(
+                        RiskViolation(
+                            code="cooldown_after_loss",
+                            message="Cooldown after recent losses is still active.",
+                        )
+                    )
 
         if allowed_notional <= 0:
             violations.append(
@@ -118,7 +127,7 @@ class RiskManager:
                     message="Computed trade size is zero after applying limits.",
                 )
             )
-        elif allowed_notional < self._config.min_notional_usd:
+        elif not reduce_only and allowed_notional < self._config.min_notional_usd:
             violations.append(
                 RiskViolation(
                     code="min_notional",
@@ -126,8 +135,11 @@ class RiskManager:
                 )
             )
 
-        if allowed_notional < proposed_notional:
+        if not reduce_only and allowed_notional < proposed_notional:
             notes.append("Position size was capped by the max position-size guardrail.")
+
+        if reduce_only:
+            notes.append("Reduce-only exit bypassed the entry guardrails.")
 
         return RiskCheckResult(
             approved=not violations,

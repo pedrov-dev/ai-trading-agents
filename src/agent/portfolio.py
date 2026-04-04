@@ -91,34 +91,101 @@ class LocalPortfolioStateProvider:
         if quantity <= 0 or price <= 0:
             return self._snapshot
 
-        opened_at = filled_at or datetime.now(UTC)
-        position_side: PositionSide = "long" if side == "buy" else "short"
-        updated_positions = tuple(
-            position for position in self._snapshot.positions if position.symbol_id != symbol_id
-        ) + (
-            Position(
-                symbol_id=symbol_id,
-                side=position_side,
-                quantity=round(quantity, 8),
-                entry_price=round(price, 8),
-                opened_at=opened_at,
-            ),
-        )
-
+        observed_at = filled_at or datetime.now(UTC)
         notional = round(quantity * price, 2)
         next_cash = (
             self._snapshot.cash_usd - notional
             if side == "buy"
             else self._snapshot.cash_usd + notional
         )
+
+        existing = self._snapshot.position_for_symbol(symbol_id)
+        remaining_positions = tuple(
+            position
+            for position in self._snapshot.positions
+            if position.symbol_id != symbol_id
+        )
+        realized_change = 0.0
+        updated_position: Position | None = None
+
+        if existing is None:
+            updated_position = Position(
+                symbol_id=symbol_id,
+                side="long" if side == "buy" else "short",
+                quantity=round(quantity, 8),
+                entry_price=round(price, 8),
+                opened_at=observed_at,
+            )
+        else:
+            existing_signed_quantity = _signed_quantity(existing)
+            fill_signed_quantity = quantity if side == "buy" else -quantity
+            new_signed_quantity = existing_signed_quantity + fill_signed_quantity
+
+            if existing_signed_quantity * fill_signed_quantity > 0:
+                weighted_entry = (
+                    (abs(existing_signed_quantity) * existing.entry_price)
+                    + (abs(fill_signed_quantity) * price)
+                ) / abs(new_signed_quantity)
+                updated_position = Position(
+                    symbol_id=symbol_id,
+                    side=existing.side,
+                    quantity=round(abs(new_signed_quantity), 8),
+                    entry_price=round(weighted_entry, 8),
+                    opened_at=existing.opened_at,
+                )
+            else:
+                closed_quantity = min(
+                    abs(existing_signed_quantity),
+                    abs(fill_signed_quantity),
+                )
+                realized_change = round(
+                    _calculate_realized_pnl(
+                        position=existing,
+                        exit_price=price,
+                        closed_quantity=closed_quantity,
+                    ),
+                    2,
+                )
+
+                if abs(new_signed_quantity) > 0:
+                    if existing_signed_quantity * new_signed_quantity > 0:
+                        updated_position = Position(
+                            symbol_id=symbol_id,
+                            side=existing.side,
+                            quantity=round(abs(new_signed_quantity), 8),
+                            entry_price=round(existing.entry_price, 8),
+                            opened_at=existing.opened_at,
+                        )
+                    else:
+                        updated_position = Position(
+                            symbol_id=symbol_id,
+                            side="long" if new_signed_quantity > 0 else "short",
+                            quantity=round(abs(new_signed_quantity), 8),
+                            entry_price=round(price, 8),
+                            opened_at=observed_at,
+                        )
+
+        updated_positions = remaining_positions + ((updated_position,) if updated_position else ())
+        realized_total = round(self._snapshot.realized_pnl_today + realized_change, 2)
+        total_equity = round(self._snapshot.total_equity + realized_change, 2)
+        consecutive_losses = self._snapshot.consecutive_losses
+        last_loss_at = self._snapshot.last_loss_at
+
+        if realized_change < 0:
+            consecutive_losses += 1
+            last_loss_at = observed_at
+        elif realized_change > 0:
+            consecutive_losses = 0
+            last_loss_at = None
+
         self._snapshot = PortfolioSnapshot(
-            total_equity=round(self._snapshot.total_equity, 2),
+            total_equity=total_equity,
             cash_usd=round(next_cash, 2),
             positions=updated_positions,
-            realized_pnl_today=self._snapshot.realized_pnl_today,
-            consecutive_losses=self._snapshot.consecutive_losses,
-            last_loss_at=self._snapshot.last_loss_at,
-            as_of=opened_at,
+            realized_pnl_today=realized_total,
+            consecutive_losses=consecutive_losses,
+            last_loss_at=last_loss_at,
+            as_of=observed_at,
         )
         return self._snapshot
 
@@ -140,3 +207,19 @@ class LocalPortfolioStateProvider:
             as_of=observed_at,
         )
         return self._snapshot
+
+
+def _signed_quantity(position: Position) -> float:
+    return position.quantity if position.side == "long" else -position.quantity
+
+
+def _calculate_realized_pnl(
+    *,
+    position: Position,
+    exit_price: float,
+    closed_quantity: float,
+) -> float:
+    quantity = abs(closed_quantity)
+    if position.side == "short":
+        return (position.entry_price - exit_price) * quantity
+    return (exit_price - position.entry_price) * quantity

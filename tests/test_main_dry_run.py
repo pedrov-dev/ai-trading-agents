@@ -10,6 +10,7 @@ from detection.event_detection_postgres import PostgresEventDetectionRepository
 from execution.kraken_cli import CommandRunResult, KrakenCLIConfig
 from identity.erc8004_registry import SepoliaContractsConfig
 from ingestion.prices_config import PRICE_SYMBOLS
+from ingestion.prices_ingestion import PriceQuote
 from ingestion.rss_config import FeedSource
 from main import build_local_demo_app, build_runtime_preflight, validate_runtime_requirements
 from storage.raw_postgres import PostgresIngestionRunsRepository, PostgresRawEventsRepository
@@ -31,6 +32,115 @@ def test_local_portfolio_provider_keeps_equity_stable_when_opening_short() -> No
     assert snapshot.cash_usd == 10_500.0
     assert snapshot.total_equity == 10_000.0
     assert snapshot.positions[0].side == "short"
+
+
+def test_local_portfolio_provider_realizes_pnl_when_closing_a_long() -> None:
+    provider = LocalPortfolioStateProvider(starting_equity=10_000.0)
+
+    provider.record_fill(
+        symbol_id="btc_usd",
+        side="buy",
+        quantity=0.01,
+        price=50_000.0,
+    )
+    provider.record_fill(
+        symbol_id="btc_usd",
+        side="sell",
+        quantity=0.01,
+        price=52_000.0,
+    )
+    snapshot = provider.get_portfolio_snapshot()
+
+    assert snapshot.cash_usd == 10_020.0
+    assert snapshot.total_equity == 10_020.0
+    assert snapshot.realized_pnl_today == 20.0
+    assert snapshot.open_position_count() == 0
+
+
+def test_local_portfolio_provider_tracks_partial_close_losses() -> None:
+    provider = LocalPortfolioStateProvider(starting_equity=10_000.0)
+
+    provider.record_fill(
+        symbol_id="btc_usd",
+        side="buy",
+        quantity=0.02,
+        price=50_000.0,
+    )
+    provider.record_fill(
+        symbol_id="btc_usd",
+        side="sell",
+        quantity=0.01,
+        price=49_000.0,
+    )
+    snapshot = provider.get_portfolio_snapshot()
+
+    assert snapshot.cash_usd == 9_490.0
+    assert snapshot.total_equity == 9_990.0
+    assert snapshot.realized_pnl_today == -10.0
+    assert snapshot.open_position_count() == 1
+    assert snapshot.positions[0].side == "long"
+    assert snapshot.positions[0].quantity == 0.01
+    assert snapshot.consecutive_losses == 1
+    assert snapshot.last_loss_at is not None
+
+
+def test_kraken_paper_app_closes_open_position_on_take_profit(tmp_path: Path) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...], timeout_seconds: int) -> CommandRunResult:
+        assert timeout_seconds == 15
+        calls.append(command)
+        return CommandRunResult(
+            exit_code=0,
+            stdout='{"status": "validated", "validated": true}',
+            stderr="",
+        )
+
+    app = build_local_demo_app(
+        base_dir=tmp_path,
+        trading_mode="paper",
+        execution_runner=fake_runner,
+        env={
+            "KRAKEN_API_KEY": "demo-key",
+            "KRAKEN_API_SECRET": "demo-secret",
+        },
+        execution_config=KrakenCLIConfig(
+            executable="kraken-cli",
+            dry_run=False,
+            live_enabled=True,
+            validate_only=True,
+            audit_log_path=tmp_path / "artifacts" / "orders_audit.jsonl",
+        ),
+    )
+    app._portfolio_provider.record_fill(
+        symbol_id="btc_usd",
+        side="buy",
+        quantity=0.01,
+        price=50_000.0,
+        filled_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC),
+    )
+    app._latest_quotes = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=51_500.0,
+            open=50_100.0,
+            high=51_600.0,
+            low=49_900.0,
+            prev_close=50_050.0,
+            timestamp=1712100000,
+            asset_class="spot",
+        )
+    ]
+
+    result = app.execute_trade_cycle(classification_count=0)
+
+    assert len(result.trade_intents) == 1
+    assert result.trade_intents[0].side == "sell"
+    assert len(result.execution_results) == 1
+    assert result.portfolio.open_position_count() == 0
+    assert result.portfolio.realized_pnl_today == 15.0
+    assert "--side" in calls[0]
+    assert "sell" in calls[0]
 
 
 def test_kraken_paper_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Path) -> None:

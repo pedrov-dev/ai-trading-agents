@@ -745,55 +745,40 @@ class TradingApplication:
     ) -> RuntimeCycleResult:
         current_portfolio = self._portfolio_provider.get_portfolio_snapshot()
         detected_events = self._new_detected_events()
-        trade_intents = tuple(
+
+        evaluate_position_exits = getattr(self._strategy, "evaluate_position_exits", None)
+        exit_intents = (
+            tuple(
+                evaluate_position_exits(
+                    portfolio=current_portfolio,
+                    price_quotes=list(self._latest_quotes),
+                    detected_events=list(detected_events),
+                )
+            )
+            if callable(evaluate_position_exits)
+            else ()
+        )
+        exit_results, exit_artifacts = self._execute_intents(
+            trade_intents=exit_intents,
+            current_portfolio=current_portfolio,
+        )
+
+        current_portfolio = self._portfolio_provider.get_portfolio_snapshot()
+        entry_intents = tuple(
             self._strategy.generate_trade_intents(
                 detected_events=list(detected_events),
                 price_quotes=list(self._latest_quotes),
                 portfolio=current_portfolio,
             )
         )
+        entry_results, entry_artifacts = self._execute_intents(
+            trade_intents=entry_intents,
+            current_portfolio=current_portfolio,
+        )
 
-        execution_results: list[ExecutionResult] = []
-        artifacts: list[ValidationArtifact] = []
-
-        for intent in trade_intents:
-            subject_id = (
-                f"{intent.symbol_id}:{intent.side}:{intent.generated_at.isoformat()}"
-            )
-            trade_artifact = ValidationArtifact.from_trade_intent(
-                intent,
-                agent_id=self._identity.agent_id,
-            )
-            risk_result = self._strategy.reassess_trade_intent(
-                intent=intent,
-                portfolio=current_portfolio,
-            )
-            risk_artifact = ValidationArtifact.from_risk_check(
-                risk_result,
-                agent_id=self._identity.agent_id,
-                subject_id=subject_id,
-                proposed_notional=intent.notional_usd,
-                checked_at=intent.generated_at,
-            )
-            artifacts.extend((trade_artifact, risk_artifact))
-            if not risk_result.approved:
-                continue
-
-            execution_result = self._executor.submit_trade_intent(intent)
-            execution_results.append(execution_result)
-            if execution_result.fill is not None and execution_result.is_successful:
-                self._portfolio_provider.record_fill(
-                    symbol_id=intent.symbol_id,
-                    side=intent.side,
-                    quantity=execution_result.fill.filled_quantity,
-                    price=execution_result.fill.average_price,
-                    filled_at=execution_result.fill.filled_at,
-                )
-            execution_artifact = ValidationArtifact.from_execution_result(
-                execution_result,
-                agent_id=self._identity.agent_id,
-            )
-            artifacts.append(execution_artifact)
+        trade_intents = exit_intents + entry_intents
+        execution_results = [*exit_results, *entry_results]
+        artifacts = [*exit_artifacts, *entry_artifacts]
 
         portfolio = self._portfolio_provider.get_portfolio_snapshot()
         performance_artifact = ValidationArtifact.from_performance_checkpoint(
@@ -853,6 +838,58 @@ class TradingApplication:
             summary=result.to_dict(),
         )
         return result
+
+    def _execute_intents(
+        self,
+        *,
+        trade_intents: tuple[TradeIntent, ...],
+        current_portfolio: PortfolioSnapshot,
+    ) -> tuple[list[ExecutionResult], list[ValidationArtifact]]:
+        execution_results: list[ExecutionResult] = []
+        artifacts: list[ValidationArtifact] = []
+        working_portfolio = current_portfolio
+
+        for intent in trade_intents:
+            subject_id = (
+                f"{intent.symbol_id}:{intent.side}:{intent.generated_at.isoformat()}"
+            )
+            trade_artifact = ValidationArtifact.from_trade_intent(
+                intent,
+                agent_id=self._identity.agent_id,
+            )
+            risk_result = self._strategy.reassess_trade_intent(
+                intent=intent,
+                portfolio=working_portfolio,
+            )
+            risk_artifact = ValidationArtifact.from_risk_check(
+                risk_result,
+                agent_id=self._identity.agent_id,
+                subject_id=subject_id,
+                proposed_notional=intent.notional_usd,
+                checked_at=intent.generated_at,
+            )
+            artifacts.extend((trade_artifact, risk_artifact))
+            if not risk_result.approved:
+                continue
+
+            execution_result = self._executor.submit_trade_intent(intent)
+            execution_results.append(execution_result)
+            if execution_result.fill is not None and execution_result.is_successful:
+                self._portfolio_provider.record_fill(
+                    symbol_id=intent.symbol_id,
+                    side=intent.side,
+                    quantity=execution_result.fill.filled_quantity,
+                    price=execution_result.fill.average_price,
+                    filled_at=execution_result.fill.filled_at,
+                )
+                working_portfolio = self._portfolio_provider.get_portfolio_snapshot()
+            execution_artifact = ValidationArtifact.from_execution_result(
+                execution_result,
+                agent_id=self._identity.agent_id,
+            )
+            artifacts.append(execution_artifact)
+
+        return execution_results, artifacts
 
     def _new_detected_events(self) -> tuple[DetectedEvent, ...]:
         unseen: list[DetectedEvent] = []

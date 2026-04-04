@@ -1,8 +1,8 @@
 from datetime import UTC, datetime
 
-from agent.portfolio import PortfolioSnapshot
+from agent.portfolio import PortfolioSnapshot, Position
 from agent.risk import RiskConfig
-from agent.strategy import SimpleEventDrivenStrategy, StrategyConfig
+from agent.strategy import ExitConfig, SimpleEventDrivenStrategy, StrategyConfig
 from detection.event_detection import DetectedEvent
 from ingestion.prices_ingestion import PriceQuote
 
@@ -85,3 +85,101 @@ def test_strategy_skips_low_score_or_risk_blocked_setups() -> None:
     )
 
     assert intents == []
+
+
+def test_strategy_generates_exit_intent_when_take_profit_is_hit() -> None:
+    strategy = SimpleEventDrivenStrategy(
+        exit_config=ExitConfig(
+            profit_target_fraction=0.02,
+            stop_loss_fraction=0.05,
+            max_hold_minutes=240,
+        )
+    )
+    portfolio = PortfolioSnapshot(
+        total_equity=10_000.0,
+        cash_usd=9_500.0,
+        positions=(
+            Position(
+                symbol_id="btc_usd",
+                side="long",
+                quantity=0.01,
+                entry_price=50_000.0,
+                opened_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC),
+            ),
+        ),
+    )
+    prices = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=51_500.0,
+            open=50_500.0,
+            high=51_700.0,
+            low=50_200.0,
+            prev_close=50_400.0,
+            timestamp=1712100000,
+            asset_class="spot",
+        )
+    ]
+
+    intents = strategy.evaluate_position_exits(
+        portfolio=portfolio,
+        price_quotes=prices,
+        detected_events=[],
+        now=datetime(2026, 4, 3, 12, 30, tzinfo=UTC),
+    )
+
+    assert len(intents) == 1
+    assert intents[0].symbol_id == "btc_usd"
+    assert intents[0].side == "sell"
+    assert intents[0].quantity == 0.01
+    assert any("profit" in reason.lower() for reason in intents[0].rationale)
+
+
+def test_strategy_generates_exit_intent_for_opposite_event_on_open_position() -> None:
+    strategy = SimpleEventDrivenStrategy(exit_config=ExitConfig())
+    portfolio = PortfolioSnapshot(
+        total_equity=10_000.0,
+        cash_usd=9_500.0,
+        positions=(
+            Position(
+                symbol_id="btc_usd",
+                side="long",
+                quantity=0.01,
+                entry_price=50_000.0,
+                opened_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC),
+            ),
+        ),
+    )
+    prices = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=49_900.0,
+            open=50_100.0,
+            high=50_200.0,
+            low=49_800.0,
+            prev_close=50_150.0,
+            timestamp=1712100000,
+            asset_class="spot",
+        )
+    ]
+    events = [
+        DetectedEvent(
+            raw_event_id="evt-3",
+            event_type="SECURITY_INCIDENT",
+            rule_name="security_incident",
+            confidence=0.92,
+            matched_text="bitcoin wallet exploit puts btc under pressure",
+            detected_at=datetime(2026, 4, 3, 12, 20, tzinfo=UTC),
+        )
+    ]
+
+    intents = strategy.evaluate_position_exits(
+        portfolio=portfolio,
+        price_quotes=prices,
+        detected_events=events,
+        now=datetime(2026, 4, 3, 12, 25, tzinfo=UTC),
+    )
+
+    assert len(intents) == 1
+    assert intents[0].side == "sell"
+    assert any("opposite" in reason.lower() for reason in intents[0].rationale)
