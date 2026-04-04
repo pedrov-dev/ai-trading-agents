@@ -171,6 +171,30 @@ def test_build_local_demo_app_uses_env_execution_config(tmp_path: Path) -> None:
     assert app._executor._config.audit_log_path == tmp_path / "artifacts" / "orders_audit.jsonl"
 
 
+def test_build_local_demo_app_supports_kraken_paper_mode(tmp_path: Path) -> None:
+    app = build_local_demo_app(base_dir=tmp_path, env={}, kraken_paper=True)
+
+    assert app._executor._config.dry_run is False
+    assert app._executor._config.live_enabled is True
+    assert app._executor._config.validate_only is True
+    assert app._executor._config.audit_log_path == tmp_path / "artifacts" / "orders_audit.jsonl"
+
+
+def test_validate_runtime_requirements_blocks_live_submit_without_opt_in(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="paper-only"):
+        validate_runtime_requirements(
+            runtime_mode="local",
+            base_dir=tmp_path,
+            env={
+                "KRAKEN_EXECUTION_DRY_RUN": "false",
+                "KRAKEN_LIVE_ENABLED": "true",
+                "KRAKEN_VALIDATE_ONLY": "false",
+            },
+        )
+
+
 def test_validate_runtime_requirements_blocks_missing_sepolia_keys(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="PRIVATE_KEY"):
         validate_runtime_requirements(

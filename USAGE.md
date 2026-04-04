@@ -1,6 +1,6 @@
 # Usage Guide
 
-> PowerShell examples below assume you are in the repo root. `.env.example` is a **template only** — export the variables in your shell before running Sepolia or live-enabled flows.
+> PowerShell examples below assume you are in the repo root. The app now auto-loads `.env` and `.runtime.env` from `--base-dir`, so saved Kraken/Sepolia settings are picked up automatically.
 
 ## 1) One-time setup
 
@@ -70,24 +70,25 @@ python src/main.py --base-dir . --serve `
 Use this to reach Kraken in **paper-only validation mode** without placing a real order.
 
 1. Activate the environment.
-2. Disable local dry-run, enable the live path, and keep Kraken validation-only enabled.
-3. Optionally export `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` if you want the repo-installed `kraken-cli` to hit Kraken’s private `AddOrder` validation endpoint.
-4. Run the normal local cycle.
+2. Put `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` in `.env` if you want the repo-installed `kraken-cli` to call Kraken’s private `AddOrder` validation endpoint.
+3. Run the safe paper-mode flag.
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-$env:KRAKEN_EXECUTION_DRY_RUN = "false"
-$env:KRAKEN_LIVE_ENABLED = "true"
-$env:KRAKEN_VALIDATE_ONLY = "true"
-# Optional for real Kraken validation:
-# $env:KRAKEN_API_KEY = "..."
-# $env:KRAKEN_API_SECRET = "..."
-python src/main.py --base-dir .
+python src/main.py --base-dir . --kraken-paper
 ```
 
-> This still uses `--runtime-mode local`; only the order execution path changes.
+Optional shell overrides if you do not want to use `.env`:
+
+```powershell
+$env:KRAKEN_API_KEY = "..."
+$env:KRAKEN_API_SECRET = "..."
+python src/main.py --base-dir . --kraken-paper
+```
+
+> `--kraken-paper` forces `KRAKEN_EXECUTION_DRY_RUN=false`, `KRAKEN_LIVE_ENABLED=true`, and `KRAKEN_VALIDATE_ONLY=true` for the current run.
 >
-> `KRAKEN_VALIDATE_ONLY=true` keeps the Kraken CLI on `--validate`, so the order is checked by Kraken but **not actually submitted**. Set it to `false` only if you intentionally want real live submission.
+> The output now includes an `execution_config` block so you can confirm `live_connected_paper_trading=true` and `will_submit_real_orders=false` before trusting the run.
 
 ---
 

@@ -45,10 +45,35 @@ _DEFAULT_KRAKEN_API_URL = "https://api.kraken.com"
 
 def _default_cli_executable() -> str:
     script_name = "kraken-cli.exe" if os.name == "nt" else "kraken-cli"
-    local_script = Path(sys.executable).resolve().with_name(script_name)
-    if local_script.exists():
-        return str(local_script)
+    executable_path = Path(sys.executable)
+    candidates: list[Path] = [executable_path.with_name(script_name)]
+
+    try:
+        candidates.append(executable_path.resolve().with_name(script_name))
+    except OSError:
+        pass
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.exists():
+            return str(candidate)
     return "kraken-cli"
+
+
+def _normalize_cli_executable(executable: str | None) -> str:
+    default_executable = _default_cli_executable()
+    configured = (executable or "").strip()
+    if not configured:
+        return default_executable
+
+    if configured.lower() in {"kraken-cli", "kraken-cli.exe"}:
+        default_path = Path(default_executable)
+        if default_path.exists():
+            return str(default_path)
+    return configured
 
 
 @dataclass(frozen=True)
@@ -83,7 +108,9 @@ class KrakenCLIConfig:
         """Create a config from environment variables using safe defaults."""
         source = env or os.environ
         return cls(
-            executable=source.get("KRAKEN_CLI_EXECUTABLE", _default_cli_executable()),
+            executable=_normalize_cli_executable(
+                source.get("KRAKEN_CLI_EXECUTABLE")
+            ),
             dry_run=_parse_bool(source.get("KRAKEN_EXECUTION_DRY_RUN"), default=True),
             live_enabled=_parse_bool(source.get("KRAKEN_LIVE_ENABLED"), default=False),
             validate_only=_parse_bool(source.get("KRAKEN_VALIDATE_ONLY"), default=True),

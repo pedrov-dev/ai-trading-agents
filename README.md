@@ -64,5 +64,7 @@ The run summary now reports shared-contract status, including missing env values
 
 - Default mode is **safe dry run**.
 - No live trading is enabled by default.
+- `python src/main.py --base-dir . --kraken-paper` enables the safe live-connected Kraken **paper-only** path.
 - `local` mode remains the default for tests and offline development.
+- The app auto-loads `.env` / `.runtime.env` from the selected `--base-dir`.
 - For optional external-backed mode, copy values from `.env.example`.

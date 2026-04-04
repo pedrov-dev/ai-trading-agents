@@ -32,5 +32,6 @@ print(result.to_dict())
 ## Notes
 
 - Defaults to simulated/dry-run.
-- For a live-connected **paper-only** run, set `KRAKEN_EXECUTION_DRY_RUN=false`, `KRAKEN_LIVE_ENABLED=true`, and keep `KRAKEN_VALIDATE_ONLY=true` so the CLI sends `--validate` without placing a real order.
+- For a live-connected **paper-only** run, use `python src/main.py --base-dir . --kraken-paper` or set `KRAKEN_EXECUTION_DRY_RUN=false`, `KRAKEN_LIVE_ENABLED=true`, and keep `KRAKEN_VALIDATE_ONLY=true` so the CLI sends `--validate` without placing a real order.
+- `src/main.py` now blocks unsafe live submission unless `KRAKEN_CLI_ALLOW_LIVE_SUBMIT=true` is explicitly set.
 - Set `KRAKEN_VALIDATE_ONLY=false` only if you intentionally want real submission with exchange credentials.

@@ -1,11 +1,13 @@
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 from agent.signals import TradeIntent
 from execution.kraken_cli import (
     CommandRunResult,
     KrakenCLIConfig,
     KrakenCLIExecutor,
+    _default_cli_executable,
 )
 from execution.kraken_cli import (
     main as kraken_cli_main,
@@ -24,6 +26,51 @@ def _make_intent(*, side: str = "buy") -> TradeIntent:
         rationale=("ETF approval momentum", "Risk checks cleared"),
         generated_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC),
     )
+
+
+def test_default_cli_executable_prefers_venv_script_next_to_sys_executable(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    venv_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    venv_python.parent.mkdir(parents=True, exist_ok=True)
+    venv_python.write_text("", encoding="utf-8")
+    local_cli = venv_python.with_name("kraken-cli.exe")
+    local_cli.write_text("", encoding="utf-8")
+
+    resolved_python = tmp_path / "base-python" / "python.exe"
+    resolved_python.parent.mkdir(parents=True, exist_ok=True)
+    resolved_python.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr("execution.kraken_cli.sys.executable", str(venv_python))
+
+    original_resolve = Path.resolve
+
+    def fake_resolve(self: Path, *args: object, **kwargs: object) -> Path:
+        if self == venv_python:
+            return resolved_python
+        return original_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve, raising=False)
+
+    assert _default_cli_executable() == str(local_cli)
+
+
+def test_config_from_env_prefers_local_console_script_for_generic_kraken_cli_value(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    venv_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    venv_python.parent.mkdir(parents=True, exist_ok=True)
+    venv_python.write_text("", encoding="utf-8")
+    local_cli = venv_python.with_name("kraken-cli.exe")
+    local_cli.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr("execution.kraken_cli.sys.executable", str(venv_python))
+
+    config = KrakenCLIConfig.from_env({"KRAKEN_CLI_EXECUTABLE": "kraken-cli"})
+
+    assert config.executable == str(local_cli)
 
 
 def test_build_command_translates_trade_intent_to_kraken_cli_args(tmp_path) -> None:
