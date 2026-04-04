@@ -52,6 +52,6 @@ class InfoScheduler:
     def start(self) -> None:
         self._scheduler.resume()
 
-    def shutdown(self) -> None:
+    def shutdown(self, *, wait: bool = True) -> None:
         if self._scheduler.state != STATE_STOPPED:
-            self._scheduler.shutdown(wait=False)
+            self._scheduler.shutdown(wait=wait)

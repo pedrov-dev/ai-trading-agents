@@ -1,10 +1,15 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from agent.portfolio import LocalPortfolioStateProvider
+from agent.risk import RiskCheckResult, RiskViolation
+from agent.signals import TradeIntent
 from identity.erc8004_registry import SepoliaContractsConfig
 from ingestion.prices_config import PRICE_SYMBOLS
 from ingestion.rss_config import FeedSource
-from main import build_local_demo_app
+from main import build_local_demo_app, validate_runtime_requirements
 
 BTC_SYMBOL = next(symbol for symbol in PRICE_SYMBOLS if symbol.symbol_id == "btc_usd")
 
@@ -143,3 +148,84 @@ def test_shared_contract_status_includes_balance_and_claim_state() -> None:
     assert status["agent_id"] == "42"
     assert status["has_claimed_allocation"] is True
     assert status["vault_balance_wei"] == 50_000_000_000_000_000
+
+
+def test_build_local_demo_app_uses_env_execution_config(tmp_path: Path) -> None:
+    app = build_local_demo_app(
+        base_dir=tmp_path,
+        env={
+            "KRAKEN_EXECUTION_DRY_RUN": "false",
+            "KRAKEN_LIVE_ENABLED": "true",
+            "KRAKEN_CLI_TIMEOUT_SECONDS": "21",
+        },
+    )
+
+    assert app._executor._config.dry_run is False
+    assert app._executor._config.live_enabled is True
+    assert app._executor._config.timeout_seconds == 21
+    assert app._executor._config.audit_log_path == tmp_path / "artifacts" / "orders_audit.jsonl"
+
+
+def test_validate_runtime_requirements_blocks_missing_sepolia_keys(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="PRIVATE_KEY"):
+        validate_runtime_requirements(
+            runtime_mode="sepolia",
+            base_dir=tmp_path,
+            env={"SEPOLIA_RPC_URL": "https://ethereum-sepolia-rpc.publicnode.com"},
+            require_transaction_keys=True,
+        )
+
+
+def test_execute_trade_cycle_skips_execution_when_runtime_risk_recheck_fails(
+    tmp_path: Path,
+) -> None:
+    app = build_local_demo_app(base_dir=tmp_path)
+
+    class _AlwaysIntentStrategy:
+        def generate_trade_intents(self, **_: object) -> list[TradeIntent]:
+            return [
+                TradeIntent(
+                    symbol_id="btc_usd",
+                    side="buy",
+                    notional_usd=250.0,
+                    quantity=0.00367647,
+                    current_price=68000.0,
+                    score=0.91,
+                    rationale=("Strong ETF approval signal",),
+                    generated_at=datetime(2026, 4, 3, tzinfo=UTC),
+                )
+            ]
+
+        def reassess_trade_intent(
+            self,
+            *,
+            intent: TradeIntent,
+            portfolio: object,
+        ) -> RiskCheckResult:
+            del intent, portfolio
+            return RiskCheckResult(
+                approved=False,
+                allowed_notional=0.0,
+                violations=(
+                    RiskViolation(
+                        code="runtime_circuit_breaker",
+                        message="Execution blocked after a runtime risk re-check.",
+                    ),
+                ),
+                notes=("Blocked at execution time.",),
+            )
+
+    app._strategy = _AlwaysIntentStrategy()
+
+    result = app.execute_trade_cycle()
+    risk_artifacts = [
+        artifact
+        for artifact in result.artifacts
+        if artifact.kind.value == "pre_trade_risk_check"
+    ]
+
+    assert len(result.trade_intents) == 1
+    assert result.execution_results == ()
+    assert len(risk_artifacts) == 1
+    assert risk_artifacts[0].payload["approved"] is False
+    assert risk_artifacts[0].payload["violations"][0]["code"] == "runtime_circuit_breaker"

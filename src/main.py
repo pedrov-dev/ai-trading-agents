@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
+import threading
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from agent.portfolio import LocalPortfolioStateProvider, PortfolioSnapshot
-from agent.risk import RiskCheckResult
 from agent.signals import TradeIntent
 from agent.strategy import SimpleEventDrivenStrategy
 from detection.event_detection import DetectedEvent, RuleBasedEventDetector
@@ -209,6 +210,7 @@ class DryRunApplication:
         http_get: Any | None = None,
         scheduler: InfoScheduler | None = None,
         identity_registry: IdentityRegistry | None = None,
+        execution_config: KrakenCLIConfig | None = None,
         runtime_mode: str = "local",
         agent_display_name: str = "AI Trading Agent Demo",
         agent_strategy_name: str = "simple_event_driven",
@@ -245,13 +247,12 @@ class DryRunApplication:
             event_detection_repository=self._event_repository,
         )
         self._strategy = SimpleEventDrivenStrategy()
-        self._executor = KrakenCLIExecutor(
-            config=KrakenCLIConfig(
-                dry_run=True,
-                live_enabled=False,
-                audit_log_path=paths.audit_log_path,
-            )
+        resolved_execution_config = execution_config or KrakenCLIConfig(
+            dry_run=True,
+            live_enabled=False,
+            audit_log_path=paths.audit_log_path,
         )
+        self._executor = KrakenCLIExecutor(config=resolved_execution_config)
         self._portfolio_provider = LocalPortfolioStateProvider(
             starting_equity=10_000.0,
             starting_cash_usd=10_000.0,
@@ -707,17 +708,21 @@ class DryRunApplication:
                 intent,
                 agent_id=self._identity.agent_id,
             )
+            risk_result = self._strategy.reassess_trade_intent(
+                intent=intent,
+                portfolio=current_portfolio,
+            )
             risk_artifact = ValidationArtifact.from_risk_check(
-                RiskCheckResult(
-                    approved=True,
-                    allowed_notional=intent.notional_usd,
-                    notes=("Trade approved by the strategy risk manager.",),
-                ),
+                risk_result,
                 agent_id=self._identity.agent_id,
                 subject_id=subject_id,
                 proposed_notional=intent.notional_usd,
                 checked_at=intent.generated_at,
             )
+            artifacts.extend((trade_artifact, risk_artifact))
+            if not risk_result.approved:
+                continue
+
             execution_result = self._executor.submit_trade_intent(intent)
             execution_results.append(execution_result)
             if execution_result.fill is not None and execution_result.is_successful:
@@ -732,7 +737,7 @@ class DryRunApplication:
                 execution_result,
                 agent_id=self._identity.agent_id,
             )
-            artifacts.extend((trade_artifact, risk_artifact, execution_artifact))
+            artifacts.append(execution_artifact)
 
         portfolio = self._portfolio_provider.get_portfolio_snapshot()
         performance_artifact = ValidationArtifact.from_performance_checkpoint(
@@ -842,6 +847,17 @@ def _load_agent_profile(env: Mapping[str, str] | None, runtime_mode: str) -> dic
     }
 
 
+def _build_execution_config(
+    *,
+    paths: DryRunRuntimePaths,
+    env: Mapping[str, str] | None = None,
+) -> KrakenCLIConfig:
+    config = KrakenCLIConfig.from_env(env)
+    if env is not None and env.get("KRAKEN_AUDIT_LOG_PATH"):
+        return config
+    return replace(config, audit_log_path=paths.audit_log_path)
+
+
 def build_local_demo_app(
     *,
     base_dir: str | Path = ROOT_DIR,
@@ -852,17 +868,133 @@ def build_local_demo_app(
     runtime_mode: str = "local",
     env: Mapping[str, str] | None = None,
 ) -> DryRunApplication:
+    paths = DryRunRuntimePaths.from_base_dir(base_dir)
     agent_profile = _load_agent_profile(env, runtime_mode)
     return DryRunApplication(
-        paths=DryRunRuntimePaths.from_base_dir(base_dir),
+        paths=paths,
         feed_groups=feed_groups or RSS_FEED_GROUPS,
         symbols=symbols or PRICE_SYMBOLS,
         parse_feed=parse_feed,
         http_get=http_get,
         identity_registry=build_identity_registry(runtime_mode=runtime_mode, env=env),
+        execution_config=_build_execution_config(paths=paths, env=env),
         runtime_mode=runtime_mode,
         **agent_profile,
     )
+
+
+def validate_runtime_requirements(
+    *,
+    runtime_mode: str,
+    base_dir: str | Path,
+    env: Mapping[str, str] | None = None,
+    require_transaction_keys: bool = False,
+) -> None:
+    if runtime_mode not in {"local", "sepolia"}:
+        raise ValueError(f"Unsupported runtime mode: {runtime_mode}")
+
+    paths = DryRunRuntimePaths.from_base_dir(base_dir)
+    paths.artifacts_dir.mkdir(parents=True, exist_ok=True)
+    paths.raw_payload_dir.mkdir(parents=True, exist_ok=True)
+
+    probe_path = paths.artifacts_dir / ".write_probe"
+    try:
+        probe_path.write_text("ok", encoding="utf-8")
+        probe_path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise ValueError(
+            f"Artifacts directory is not writable: {paths.artifacts_dir}"
+        ) from exc
+
+    if runtime_mode != "sepolia":
+        return
+
+    config = SepoliaContractsConfig.from_env(env)
+    missing = list(config.missing_required_values())
+    if not require_transaction_keys:
+        missing = [
+            key
+            for key in missing
+            if key not in {"PRIVATE_KEY", "AGENT_WALLET_PRIVATE_KEY"}
+        ]
+    if missing:
+        raise ValueError(
+            "Missing required Sepolia configuration: " + ", ".join(sorted(missing))
+        )
+
+    invalid_keys: list[str] = []
+    if config.private_key and config.operator_wallet_address is None:
+        invalid_keys.append("PRIVATE_KEY")
+    if config.agent_wallet_private_key and config.agent_wallet_address is None:
+        invalid_keys.append("AGENT_WALLET_PRIVATE_KEY")
+    if invalid_keys:
+        raise ValueError(
+            "Unable to derive wallet addresses from: " + ", ".join(invalid_keys)
+        )
+
+
+def run_scheduler_service(
+    app: DryRunApplication,
+    *,
+    feed_group: str = "market_news",
+    rss_interval_seconds: int = 120,
+    prices_interval_seconds: int = 60,
+    detection_interval_seconds: int = 60,
+    execution_interval_seconds: int = 60,
+) -> None:
+    scheduler = app.wire_scheduler(
+        feed_group=feed_group,
+        rss_interval_seconds=rss_interval_seconds,
+        prices_interval_seconds=prices_interval_seconds,
+        detection_interval_seconds=detection_interval_seconds,
+        execution_interval_seconds=execution_interval_seconds,
+    )
+    stop_event = threading.Event()
+    handled_signals = [signal.SIGINT]
+    if hasattr(signal, "SIGTERM"):
+        handled_signals.append(signal.SIGTERM)
+
+    previous_handlers: dict[signal.Signals, Any] = {}
+
+    def _request_shutdown(signum: int, _frame: Any) -> None:
+        print(
+            json.dumps(
+                {
+                    "event": "shutdown_requested",
+                    "signal": signum,
+                    "runtime_mode": getattr(app, "_runtime_mode", "unknown"),
+                },
+                sort_keys=True,
+            )
+        )
+        stop_event.set()
+
+    for signum in handled_signals:
+        previous_handlers[signum] = signal.getsignal(signum)
+        signal.signal(signum, _request_shutdown)
+
+    scheduler.start()
+    print(
+        json.dumps(
+            {
+                "event": "scheduler_started",
+                "feed_group": feed_group,
+                "rss_interval_seconds": rss_interval_seconds,
+                "prices_interval_seconds": prices_interval_seconds,
+                "detection_interval_seconds": detection_interval_seconds,
+                "execution_interval_seconds": execution_interval_seconds,
+            },
+            sort_keys=True,
+        )
+    )
+
+    try:
+        while not stop_event.wait(0.5):
+            continue
+    finally:
+        scheduler.shutdown(wait=True)
+        for signum, previous_handler in previous_handlers.items():
+            signal.signal(signum, previous_handler)
 
 
 def _build_cli_parser() -> argparse.ArgumentParser:
@@ -916,37 +1048,105 @@ def _build_cli_parser() -> argparse.ArgumentParser:
             "and post checkpoints."
         ),
     )
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help="Run the recurring scheduler instead of a one-shot cycle.",
+    )
+    parser.add_argument(
+        "--rss-interval-seconds",
+        type=int,
+        default=int(os.environ.get("RSS_INTERVAL_SECONDS", "120")),
+        help="Scheduler interval for RSS ingestion jobs.",
+    )
+    parser.add_argument(
+        "--prices-interval-seconds",
+        type=int,
+        default=int(os.environ.get("PRICES_INTERVAL_SECONDS", "60")),
+        help="Scheduler interval for price ingestion jobs.",
+    )
+    parser.add_argument(
+        "--detection-interval-seconds",
+        type=int,
+        default=int(os.environ.get("DETECTION_INTERVAL_SECONDS", "60")),
+        help="Scheduler interval for event detection jobs.",
+    )
+    parser.add_argument(
+        "--execution-interval-seconds",
+        type=int,
+        default=int(os.environ.get("EXECUTION_INTERVAL_SECONDS", "60")),
+        help="Scheduler interval for trade execution jobs.",
+    )
     return parser
 
 
 def main() -> int:
     parser = _build_cli_parser()
     args = parser.parse_args()
-    app = build_local_demo_app(
-        base_dir=args.base_dir,
-        runtime_mode=args.runtime_mode,
-        env=os.environ,
-    )
-    if args.full_flow:
-        args.register_agent = True
-        args.claim_allocation = True
-        args.submit_onchain = True
-        args.post_checkpoints = True
 
-    result = app.run_cycle(feed_group=args.feed_group)
-    payload = result.to_dict()
-    payload["runtime_mode"] = args.runtime_mode
-    if args.runtime_mode == "sepolia":
-        payload["shared_contracts"] = app.run_shared_contract_actions(
-            trade_intents=result.trade_intents,
-            checkpoints=result.checkpoints,
-            register_agent=args.register_agent,
-            claim_allocation=args.claim_allocation,
-            submit_trade_intents=args.submit_onchain,
-            post_checkpoints=args.post_checkpoints,
+    try:
+        if args.full_flow:
+            args.register_agent = True
+            args.claim_allocation = True
+            args.submit_onchain = True
+            args.post_checkpoints = True
+
+        require_transaction_keys = any(
+            (
+                args.register_agent,
+                args.claim_allocation,
+                args.submit_onchain,
+                args.post_checkpoints,
+            )
         )
-    print(json.dumps(payload, indent=2, sort_keys=True))
-    return 0
+        validate_runtime_requirements(
+            runtime_mode=args.runtime_mode,
+            base_dir=args.base_dir,
+            env=os.environ,
+            require_transaction_keys=require_transaction_keys,
+        )
+        app = build_local_demo_app(
+            base_dir=args.base_dir,
+            runtime_mode=args.runtime_mode,
+            env=os.environ,
+        )
+
+        if args.serve:
+            if require_transaction_keys:
+                raise ValueError(
+                    "`--serve` currently supports the recurring ingest/detect/execute "
+                    "loop only. Run one-shot commands for on-chain actions."
+                )
+            run_scheduler_service(
+                app,
+                feed_group=args.feed_group,
+                rss_interval_seconds=args.rss_interval_seconds,
+                prices_interval_seconds=args.prices_interval_seconds,
+                detection_interval_seconds=args.detection_interval_seconds,
+                execution_interval_seconds=args.execution_interval_seconds,
+            )
+            return 0
+
+        result = app.run_cycle(feed_group=args.feed_group)
+        payload = result.to_dict()
+        payload["runtime_mode"] = args.runtime_mode
+        if args.runtime_mode == "sepolia":
+            payload["shared_contracts"] = app.run_shared_contract_actions(
+                trade_intents=result.trade_intents,
+                checkpoints=result.checkpoints,
+                register_agent=args.register_agent,
+                claim_allocation=args.claim_allocation,
+                submit_trade_intents=args.submit_onchain,
+                post_checkpoints=args.post_checkpoints,
+            )
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    except ValueError as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}, sort_keys=True))
+        return 2
+    except Exception as exc:
+        print(json.dumps({"status": "error", "error": str(exc)}, sort_keys=True))
+        return 1
 
 
 if __name__ == "__main__":

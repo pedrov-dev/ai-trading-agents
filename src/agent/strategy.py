@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from agent.portfolio import PortfolioSnapshot
-from agent.risk import RiskConfig, RiskManager
+from agent.risk import RiskCheckResult, RiskConfig, RiskManager
 from agent.signals import (
     Signal,
     TradeIntent,
@@ -95,3 +96,29 @@ class SimpleEventDrivenStrategy:
                 break
 
         return intents
+
+    def reassess_trade_intent(
+        self,
+        *,
+        intent: TradeIntent,
+        portfolio: PortfolioSnapshot,
+        now: datetime | None = None,
+    ) -> RiskCheckResult:
+        """Re-run the same conservative risk guardrails immediately before execution."""
+        signal = Signal(
+            raw_event_id=f"runtime-recheck:{intent.symbol_id}",
+            event_type="RUNTIME_RECHECK",
+            symbol_id=intent.symbol_id,
+            side=intent.side,
+            confidence=intent.score,
+            score=intent.score,
+            current_price=intent.current_price,
+            generated_at=intent.generated_at,
+            rationale=intent.rationale,
+        )
+        return self._risk_manager.evaluate(
+            signal=signal,
+            portfolio=portfolio,
+            proposed_notional=intent.notional_usd,
+            now=now,
+        )
