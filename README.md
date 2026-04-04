@@ -26,7 +26,7 @@ A super basic local dashboard is available for demos and judging:
 streamlit run src/ui/dashboard.py
 ```
 
-It shows portfolio/performance metrics from `artifacts/run_summary.json` and lets you trigger preflight checks, one-shot runs, scheduler start/stop, and ERC-8004 actions from the browser.
+It shows portfolio/performance metrics from `artifacts/run_summary.json`, lets you trigger preflight checks plus one-shot/scheduler runs, and auto-refreshes a couple of times per minute.
 
 ## What the Kraken runtime does
 

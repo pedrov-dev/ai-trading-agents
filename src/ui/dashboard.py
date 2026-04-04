@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -18,6 +18,17 @@ try:
     import streamlit as st
 except ModuleNotFoundError:  # pragma: no cover - handled at runtime.
     st = None
+
+try:
+    import streamlit_autorefresh as _streamlit_autorefresh  # type: ignore[import-untyped]
+except ModuleNotFoundError:  # pragma: no cover - handled at runtime.
+    _streamlit_autorefresh = None
+
+st_autorefresh = (
+    cast(Callable[..., Any], _streamlit_autorefresh.st_autorefresh)
+    if _streamlit_autorefresh is not None
+    else None
+)
 
 from ingestion.rss_config import RSS_FEED_GROUPS
 from main import (
@@ -221,6 +232,7 @@ def render_dashboard() -> None:
     streamlit.caption(
         "Super basic local UI for portfolio/performance visibility and runtime controls."
     )
+    _apply_auto_refresh(streamlit)
 
     with streamlit.sidebar:
         streamlit.header("Controls")
@@ -267,36 +279,19 @@ def render_dashboard() -> None:
             value=False,
         )
 
-        refresh_clicked = streamlit.button("Refresh artifacts", use_container_width=True)
-        preflight_clicked = streamlit.button("Run preflight", use_container_width=True)
+        preflight_clicked = streamlit.button("Run preflight", width="stretch")
         run_cycle_clicked = streamlit.button(
             "Run one-shot cycle",
-            use_container_width=True,
+            width="stretch",
         )
         start_scheduler_clicked = streamlit.button(
             "Start scheduler",
-            use_container_width=True,
+            width="stretch",
         )
-        stop_scheduler_clicked = streamlit.button("Stop scheduler", use_container_width=True)
-
-        streamlit.divider()
-        streamlit.subheader("ERC-8004 actions")
-        register_clicked = streamlit.button("Register agent", use_container_width=True)
-        claim_clicked = streamlit.button("Claim allocation", use_container_width=True)
-        submit_clicked = streamlit.button("Submit on-chain", use_container_width=True)
-        post_clicked = streamlit.button("Post checkpoints", use_container_width=True)
-        full_flow_clicked = streamlit.button("Full flow", use_container_width=True)
+        stop_scheduler_clicked = streamlit.button("Stop scheduler", width="stretch")
 
     artifact_paths = _artifact_paths(base_dir)
-    if refresh_clicked:
-        loaded_payload = load_json_file(artifact_paths["summary"])
-        if loaded_payload is not None:
-            streamlit.session_state["latest_payload"] = loaded_payload
-            streamlit.session_state["status_message"] = (
-                "Loaded the latest run summary from artifacts."
-            )
-        else:
-            streamlit.session_state["status_message"] = "No run summary is available yet."
+    _sync_summary_payload(streamlit, artifact_paths["summary"])
 
     current_app = _get_or_create_app(
         streamlit,
@@ -361,17 +356,6 @@ def render_dashboard() -> None:
         _stop_scheduler(streamlit)
         streamlit.session_state["status_message"] = "Scheduler stopped."
 
-    if register_clicked:
-        _run_shared_action(streamlit, current_app, "register")
-    if claim_clicked:
-        _run_shared_action(streamlit, current_app, "claim")
-    if submit_clicked:
-        _run_shared_action(streamlit, current_app, "submit")
-    if post_clicked:
-        _run_shared_action(streamlit, current_app, "post")
-    if full_flow_clicked:
-        _run_shared_action(streamlit, current_app, "full_flow")
-
     _render_status_banner(streamlit, execution_summary)
 
     status_message = streamlit.session_state.get("status_message")
@@ -400,35 +384,44 @@ def render_dashboard() -> None:
             }
         )
         with streamlit.expander("History rows", expanded=False):
-            streamlit.dataframe(history_rows, use_container_width=True)
+            streamlit.dataframe(history_rows, width='stretch')
     else:
-        streamlit.write("No performance history yet. Run a cycle or refresh artifacts.")
+        streamlit.write(
+            "No performance history yet. Run a cycle or wait for the next auto-refresh."
+        )
 
     left_column, right_column = streamlit.columns(2)
     with left_column:
         streamlit.subheader("Open positions")
         if position_rows:
-            streamlit.dataframe(position_rows, use_container_width=True)
+            streamlit.dataframe(position_rows, width='stretch')
         else:
             streamlit.write("No open positions recorded yet.")
 
         streamlit.subheader("Recent trade intents")
         if trade_intent_rows:
-            streamlit.dataframe(trade_intent_rows, use_container_width=True)
+            streamlit.dataframe(trade_intent_rows, width='stretch')
         else:
             streamlit.write("No trade intents available yet.")
 
     with right_column:
         streamlit.subheader("Execution results")
         if execution_rows:
-            streamlit.dataframe(execution_rows, use_container_width=True)
+            streamlit.dataframe(execution_rows, width='stretch')
         else:
             streamlit.write("No execution results available yet.")
+
+        activity_records = load_jsonl_records(artifact_paths["activity"])
+        streamlit.subheader("Live activity log")
+        if activity_records:
+            streamlit.dataframe(activity_records[-15:], width='stretch')
+        else:
+            streamlit.write("No incremental actions written yet.")
 
         audit_records = load_jsonl_records(artifact_paths["audit"])
         streamlit.subheader("Audit log")
         if audit_records:
-            streamlit.dataframe(audit_records[-10:], use_container_width=True)
+            streamlit.dataframe(audit_records[-10:], width='stretch')
         else:
             streamlit.write("No audit events written yet.")
 
@@ -449,6 +442,18 @@ def render_dashboard() -> None:
     if latest_payload is not None:
         with streamlit.expander("Latest run summary JSON", expanded=False):
             streamlit.json(latest_payload)
+
+
+def _apply_auto_refresh(streamlit: Any, *, interval_ms: int = 30_000) -> None:
+    if st_autorefresh is not None:
+        st_autorefresh(interval=interval_ms, key="dashboard_auto_refresh")
+        streamlit.caption(f"Auto-refreshing every {interval_ms // 1000} seconds.")
+        return
+
+    streamlit.caption(
+        f"Auto-refresh requested every {interval_ms // 1000} seconds, but the optional "
+        "`streamlit-autorefresh` package is not installed."
+    )
 
 
 def _initialize_session_state(streamlit: Any) -> None:
@@ -472,8 +477,15 @@ def _artifact_paths(base_dir: Path) -> dict[str, Path]:
         "summary": artifacts_dir / "run_summary.json",
         "artifacts": artifacts_dir / "validation_artifacts.jsonl",
         "audit": artifacts_dir / "orders_audit.jsonl",
+        "activity": artifacts_dir / "activity_log.jsonl",
         "checkpoints": artifacts_dir / "validation_checkpoints.jsonl",
     }
+
+
+def _sync_summary_payload(streamlit: Any, summary_path: Path) -> None:
+    summary_payload = load_json_file(summary_path)
+    if summary_payload is not None:
+        streamlit.session_state["latest_payload"] = summary_payload
 
 
 def _get_or_create_app(
@@ -511,39 +523,6 @@ def _payload_from_result(result: RuntimeCycleResult, app: TradingApplication) ->
     payload["runtime_mode"] = getattr(app, "_runtime_mode", "local")
     payload["execution_config"] = app.execution_mode_summary()
     return payload
-
-
-def _run_shared_action(streamlit: Any, app: TradingApplication, action: str) -> None:
-    if getattr(app, "_identity_layer", "none") != "erc8004":
-        streamlit.session_state["status_message"] = (
-            "Enable `erc8004` in the sidebar before using shared-contract actions."
-        )
-        return
-
-    latest_result = streamlit.session_state.get("latest_result")
-    trade_intents = (
-        getattr(latest_result, "trade_intents", ()) if latest_result is not None else ()
-    )
-    checkpoints = (
-        getattr(latest_result, "checkpoints", ()) if latest_result is not None else ()
-    )
-
-    if action in {"submit", "post", "full_flow"} and latest_result is None:
-        streamlit.session_state["status_message"] = (
-            "Run a cycle first so the dashboard has trade intents and checkpoints to post."
-        )
-        return
-
-    summary = app.run_shared_contract_actions(
-        trade_intents=trade_intents,
-        checkpoints=checkpoints,
-        register_agent=action in {"register", "full_flow"},
-        claim_allocation=action in {"claim", "full_flow"},
-        submit_trade_intents=action in {"submit", "full_flow"},
-        post_checkpoints=action in {"post", "full_flow"},
-    )
-    streamlit.session_state["last_action_result"] = summary
-    streamlit.session_state["status_message"] = f"Shared-contract action `{action}` finished."
 
 
 def _stop_scheduler(streamlit: Any) -> None:

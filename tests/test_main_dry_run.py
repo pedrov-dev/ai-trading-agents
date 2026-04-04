@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -229,6 +230,91 @@ def test_kraken_paper_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Pa
     assert (tmp_path / "artifacts" / "validation_artifacts.jsonl").exists()
     assert (tmp_path / "artifacts" / "validation_checkpoints.jsonl").exists()
     assert (tmp_path / "artifacts" / "run_summary.json").exists()
+
+
+def test_run_cycle_writes_incremental_action_log_and_summary_state(tmp_path: Path) -> None:
+    def fake_parse_feed(_url: str) -> dict[str, object]:
+        return {
+            "entries": [
+                {
+                    "title": "SEC approved the bitcoin ETF after exchange review",
+                    "link": "https://example.test/bitcoin-etf-approved",
+                    "published": "2026-04-03T12:00:00+00:00",
+                }
+            ]
+        }
+
+    def fake_http_get(url: str, params: dict[str, str]) -> dict[str, object]:
+        if url.endswith("/Ticker"):
+            assert params == {"pair": BTC_SYMBOL.ticker}
+            return {
+                "error": [],
+                "result": {
+                    BTC_SYMBOL.ticker: {
+                        "c": ["68000.0", "1"],
+                        "o": "66000.0",
+                        "h": ["68500.0", "68500.0"],
+                        "l": ["65500.0", "65500.0"],
+                        "p": ["67000.0", "67000.0"],
+                    }
+                },
+            }
+        raise AssertionError(f"Unexpected URL called: {url}")
+
+    def fake_runner(command: tuple[str, ...], timeout_seconds: int) -> CommandRunResult:
+        assert timeout_seconds == 15
+        return CommandRunResult(
+            exit_code=0,
+            stdout='{"status": "validated", "validated": true}',
+            stderr="",
+        )
+
+    app = build_local_demo_app(
+        base_dir=tmp_path,
+        feed_groups={
+            "market_news": [
+                FeedSource(source_id="demo_feed", url="https://example.test/rss")
+            ]
+        },
+        symbols=[BTC_SYMBOL],
+        parse_feed=fake_parse_feed,
+        http_get=fake_http_get,
+        env={
+            "KRAKEN_API_KEY": "demo-key",
+            "KRAKEN_API_SECRET": "demo-secret",
+        },
+        trading_mode="paper",
+        execution_runner=fake_runner,
+        execution_config=KrakenCLIConfig(
+            executable="kraken-cli",
+            dry_run=False,
+            live_enabled=True,
+            validate_only=True,
+            audit_log_path=tmp_path / "artifacts" / "orders_audit.jsonl",
+        ),
+    )
+
+    result = app.run_cycle(feed_group="market_news")
+
+    activity_log_path = tmp_path / "artifacts" / "activity_log.jsonl"
+    summary_path = tmp_path / "artifacts" / "run_summary.json"
+
+    assert activity_log_path.exists()
+    activity_records = [
+        json.loads(line)
+        for line in activity_log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert activity_records[0]["action"] == "cycle_started"
+    assert activity_records[-1]["action"] == "cycle_completed"
+    assert any(record["action"] == "artifact_recorded" for record in activity_records)
+    assert all("affects" in record for record in activity_records)
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["status"] == "completed"
+    assert summary["counts"]["artifacts"] == result.artifact_count
+    assert summary["counts"]["checkpoints"] == result.checkpoint_count
+    assert summary["last_action"]["action"] == "cycle_completed"
 
 
 def test_local_demo_app_restores_portfolio_from_trade_journal(tmp_path: Path) -> None:

@@ -35,7 +35,7 @@ Available controls in the UI:
 - `Preflight`
 - `Run one-shot cycle`
 - `Start/Stop scheduler`
-- ERC-8004 actions: register, claim, submit, post checkpoints, and full flow
+- automatic dashboard refresh roughly every 30 seconds
 
 The dashboard reads the same artifact files written by the CLI and reflects the current execution safety mode.
 

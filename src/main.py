@@ -9,6 +9,7 @@ import signal
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +88,7 @@ class RuntimePaths:
     journal_log_path: Path
     artifacts_log_path: Path
     checkpoints_log_path: Path
+    activity_log_path: Path
     summary_path: Path
 
     @classmethod
@@ -101,6 +103,7 @@ class RuntimePaths:
             journal_log_path=artifacts_dir / "trading_journal.jsonl",
             artifacts_log_path=artifacts_dir / "validation_artifacts.jsonl",
             checkpoints_log_path=artifacts_dir / "validation_checkpoints.jsonl",
+            activity_log_path=artifacts_dir / "activity_log.jsonl",
             summary_path=artifacts_dir / "run_summary.json",
         )
 
@@ -191,14 +194,185 @@ class RuntimeCycleResult:
             "reputation": self.reputation.to_dict(),
         }
 
+    def to_summary_dict(self) -> dict[str, Any]:
+        payload = self.to_dict()
+        payload.pop("artifacts", None)
+        payload.pop("checkpoints", None)
+        payload["status"] = "completed"
+        payload["updated_at"] = self.portfolio.as_of.isoformat()
+        payload["counts"] = {
+            "detected_events": len(self.detected_events),
+            "trade_intents": len(self.trade_intents),
+            "executions": len(self.execution_results),
+            "artifacts": self.artifact_count,
+            "checkpoints": self.checkpoint_count,
+        }
+        payload["last_action"] = {
+            "action": "cycle_completed",
+            "status": "completed",
+            "occurred_at": self.portfolio.as_of.isoformat(),
+            "affects": ["run_summary", "portfolio", "pnl_snapshot", "drawdown_snapshot"],
+        }
+        return payload
+
 
 class LocalArtifactLedger:
-    """Persist runtime outputs as simple JSONL and JSON summary files."""
+    """Persist action-scoped runtime updates to JSONL logs and a live summary file."""
 
     def __init__(self, paths: RuntimePaths) -> None:
         self._artifacts_store = JsonlFileStore(paths.artifacts_log_path)
         self._checkpoints_store = JsonlFileStore(paths.checkpoints_log_path)
+        self._activity_store = JsonlFileStore(paths.activity_log_path)
         self._summary_store = JsonlFileStore(paths.summary_path)
+        self._recorded_artifact_ids: set[str] = set()
+        self._recorded_checkpoint_ids: set[str] = set()
+        self._summary_state: dict[str, Any] = {
+            "status": "idle",
+            "updated_at": None,
+            "counts": {
+                "actions": 0,
+                "detected_events": 0,
+                "trade_intents": 0,
+                "executions": 0,
+                "artifacts": 0,
+                "checkpoints": 0,
+            },
+            "last_action": None,
+        }
+
+    def start_cycle(
+        self,
+        *,
+        rss_result: IngestionRunResult | None,
+        prices_result: IngestionRunResult | None,
+        classification_count: int,
+        detected_events: tuple[DetectedEvent, ...],
+    ) -> None:
+        started_at = datetime.now(UTC)
+        self._summary_state = {
+            "status": "running",
+            "updated_at": started_at.isoformat(),
+            "rss_result": self._ingestion_result_to_dict(rss_result, fallback_run_id="manual-rss"),
+            "prices_result": self._ingestion_result_to_dict(
+                prices_result,
+                fallback_run_id="manual-prices",
+            ),
+            "classification_count": classification_count,
+            "counts": {
+                "actions": 0,
+                "detected_events": len(detected_events),
+                "trade_intents": 0,
+                "executions": 0,
+                "artifacts": 0,
+                "checkpoints": 0,
+            },
+            "detected_events": [
+                {
+                    "raw_event_id": event.raw_event_id,
+                    "event_type": event.event_type,
+                    "rule_name": event.rule_name,
+                    "confidence": event.confidence,
+                    "detected_at": event.detected_at.isoformat() if event.detected_at else None,
+                }
+                for event in detected_events[-10:]
+            ],
+            "trade_intents": [],
+            "execution_results": [],
+            "last_action": None,
+        }
+        self.record_action(
+            action="cycle_started",
+            status="running",
+            affects=("run_summary", "runtime_cycle"),
+            details={
+                "classification_count": classification_count,
+                "detected_event_count": len(detected_events),
+            },
+            occurred_at=started_at,
+        )
+
+    def record_artifact(self, artifact: ValidationArtifact) -> ValidationCheckpoint:
+        artifact_delta = 0
+        if artifact.artifact_id not in self._recorded_artifact_ids:
+            self._artifacts_store.append(artifact.to_dict())
+            self._recorded_artifact_ids.add(artifact.artifact_id)
+            artifact_delta = 1
+
+        checkpoint = build_checkpoints((artifact,))[0]
+        checkpoint_delta = 0
+        if checkpoint.checkpoint_id not in self._recorded_checkpoint_ids:
+            self._checkpoints_store.append(checkpoint.to_dict())
+            self._recorded_checkpoint_ids.add(checkpoint.checkpoint_id)
+            checkpoint_delta = 1
+
+        if artifact_delta or checkpoint_delta:
+            self.record_action(
+                action="artifact_recorded",
+                status=artifact.status.value,
+                affects=(
+                    "validation_artifacts",
+                    "validation_checkpoints",
+                    artifact.kind.value,
+                    artifact.subject_id,
+                ),
+                details={
+                    "artifact_id": artifact.artifact_id,
+                    "checkpoint_id": checkpoint.checkpoint_id,
+                    "artifact_kind": artifact.kind.value,
+                    "subject_id": artifact.subject_id,
+                },
+                occurred_at=artifact.created_at,
+                count_updates={
+                    "artifacts": artifact_delta,
+                    "checkpoints": checkpoint_delta,
+                },
+            )
+        return checkpoint
+
+    def record_action(
+        self,
+        *,
+        action: str,
+        affects: tuple[str, ...] | list[str],
+        details: Mapping[str, Any] | None = None,
+        status: str = "recorded",
+        occurred_at: datetime | None = None,
+        summary_updates: Mapping[str, Any] | None = None,
+        count_updates: Mapping[str, int] | None = None,
+    ) -> dict[str, Any]:
+        timestamp = (occurred_at or datetime.now(UTC)).isoformat()
+        record = {
+            "timestamp": timestamp,
+            "action": action,
+            "status": status,
+            "affects": [str(item) for item in affects if str(item)],
+            "details": dict(details or {}),
+        }
+        if summary_updates:
+            for key, value in summary_updates.items():
+                if key == "counts" and isinstance(value, Mapping):
+                    existing_counts = self._summary_state.setdefault("counts", {})
+                    existing_counts.update(dict(value))
+                    continue
+                self._summary_state[key] = value
+
+        counts = self._summary_state.setdefault("counts", {})
+        for key, delta in (count_updates or {}).items():
+            counts[key] = int(counts.get(key, 0)) + int(delta)
+        counts["actions"] = int(counts.get("actions", 0)) + 1
+
+        last_action = {
+            "action": action,
+            "status": status,
+            "occurred_at": timestamp,
+            "affects": record["affects"],
+        }
+        self._summary_state["updated_at"] = timestamp
+        self._summary_state["last_action"] = last_action
+
+        self._activity_store.append(record)
+        self._summary_store.write_json(self._summary_state)
+        return record
 
     def record(
         self,
@@ -207,11 +381,66 @@ class LocalArtifactLedger:
         checkpoints: tuple[ValidationCheckpoint, ...],
         summary: Mapping[str, Any],
     ) -> None:
-        self._artifacts_store.append_many(artifact.to_dict() for artifact in artifacts)
-        self._checkpoints_store.append_many(
-            checkpoint.to_dict() for checkpoint in checkpoints
+        for artifact in artifacts:
+            self.record_artifact(artifact)
+        for checkpoint in checkpoints:
+            if checkpoint.checkpoint_id in self._recorded_checkpoint_ids:
+                continue
+            self._checkpoints_store.append(checkpoint.to_dict())
+            self._recorded_checkpoint_ids.add(checkpoint.checkpoint_id)
+            self.record_action(
+                action="checkpoint_recorded",
+                status=checkpoint.status.value,
+                affects=("validation_checkpoints", checkpoint.checkpoint_type.value),
+                details={
+                    "checkpoint_id": checkpoint.checkpoint_id,
+                    "subject_id": checkpoint.subject_id,
+                },
+                occurred_at=checkpoint.recorded_at,
+                count_updates={"checkpoints": 1},
+            )
+
+        completed_at = str(
+            summary.get("updated_at")
+            or self._summary_state.get("updated_at")
+            or datetime.now(UTC).isoformat()
         )
-        self._summary_store.write_json(summary)
+        self.record_action(
+            action="cycle_completed",
+            status=str(summary.get("status") or "completed"),
+            affects=("run_summary", "portfolio", "pnl_snapshot", "drawdown_snapshot"),
+            details={
+                "artifact_count": int(
+                    self._summary_state.get("counts", {}).get("artifacts", 0)
+                ),
+                "checkpoint_count": int(
+                    self._summary_state.get("counts", {}).get("checkpoints", 0)
+                ),
+            },
+            occurred_at=datetime.fromisoformat(completed_at),
+            summary_updates=summary,
+        )
+
+    @staticmethod
+    def _ingestion_result_to_dict(
+        result: IngestionRunResult | None,
+        *,
+        fallback_run_id: str,
+    ) -> dict[str, Any]:
+        resolved = result or IngestionRunResult(
+            run_id=fallback_run_id,
+            status="ok",
+            fetched_count=0,
+            inserted_count=0,
+            duplicate_count=0,
+        )
+        return {
+            "run_id": resolved.run_id,
+            "status": resolved.status,
+            "fetched_count": resolved.fetched_count,
+            "inserted_count": resolved.inserted_count,
+            "duplicate_count": resolved.duplicate_count,
+        }
 
 
 class TradingApplication:
@@ -756,6 +985,22 @@ class TradingApplication:
     ) -> RuntimeCycleResult:
         current_portfolio = self._portfolio_provider.get_portfolio_snapshot()
         detected_events = self._new_detected_events()
+        self._artifact_ledger.start_cycle(
+            rss_result=rss_result,
+            prices_result=prices_result,
+            classification_count=classification_count,
+            detected_events=detected_events,
+        )
+        if detected_events:
+            self._artifact_ledger.record_action(
+                action="events_detected",
+                status="recorded",
+                affects=("event_detection", "strategy"),
+                details={
+                    "count": len(detected_events),
+                    "event_types": sorted({event.event_type for event in detected_events}),
+                },
+            )
 
         evaluate_position_exits = getattr(self._strategy, "evaluate_position_exits", None)
         exit_intents = (
@@ -769,6 +1014,18 @@ class TradingApplication:
             if callable(evaluate_position_exits)
             else ()
         )
+        if exit_intents:
+            self._artifact_ledger.record_action(
+                action="trade_intents_generated",
+                status="recorded",
+                affects=("strategy", "execution_queue", "portfolio"),
+                details={
+                    "intent_type": "exit",
+                    "count": len(exit_intents),
+                    "symbols": sorted({intent.symbol_id for intent in exit_intents}),
+                },
+                count_updates={"trade_intents": len(exit_intents)},
+            )
         exit_results, exit_artifacts = self._execute_intents(
             trade_intents=exit_intents,
             current_portfolio=current_portfolio,
@@ -782,6 +1039,18 @@ class TradingApplication:
                 portfolio=current_portfolio,
             )
         )
+        if entry_intents:
+            self._artifact_ledger.record_action(
+                action="trade_intents_generated",
+                status="recorded",
+                affects=("strategy", "execution_queue", "portfolio"),
+                details={
+                    "intent_type": "entry",
+                    "count": len(entry_intents),
+                    "symbols": sorted({intent.symbol_id for intent in entry_intents}),
+                },
+                count_updates={"trade_intents": len(entry_intents)},
+            )
         entry_results, entry_artifacts = self._execute_intents(
             trade_intents=entry_intents,
             current_portfolio=current_portfolio,
@@ -798,6 +1067,7 @@ class TradingApplication:
             checkpoint_name="local_dry_run_cycle",
         )
         artifacts.append(performance_artifact)
+        self._artifact_ledger.record_artifact(performance_artifact)
 
         checkpoints = build_checkpoints(artifacts)
         self._reputation = self._reputation_engine.apply_artifacts(
@@ -814,6 +1084,32 @@ class TradingApplication:
         drawdown_snapshot = build_drawdown_snapshot(self._equity_history)
         audit_summary = build_audit_summary_from_file(self.paths.audit_log_path)
         journal_summary = self._trade_journal.build_summary()
+        self._artifact_ledger.record_action(
+            action="performance_snapshot_updated",
+            status="recorded",
+            affects=("portfolio", "pnl_snapshot", "drawdown_snapshot", "journal_summary"),
+            details={
+                "total_equity": round(portfolio.total_equity, 2),
+                "cash_usd": round(portfolio.cash_usd, 2),
+                "open_position_count": portfolio.open_position_count(),
+                "realized_pnl_today": round(portfolio.realized_pnl_today, 2),
+            },
+            occurred_at=portfolio.as_of,
+            summary_updates={
+                "portfolio": {
+                    "total_equity": portfolio.total_equity,
+                    "cash_usd": portfolio.cash_usd,
+                    "open_position_count": portfolio.open_position_count(),
+                    "realized_pnl_today": portfolio.realized_pnl_today,
+                    "as_of": portfolio.as_of.isoformat(),
+                },
+                "pnl_snapshot": pnl_snapshot.to_dict(),
+                "drawdown_snapshot": drawdown_snapshot.to_dict(),
+                "audit_summary": audit_summary.to_dict(),
+                "journal_summary": journal_summary.to_dict(),
+                "reputation": self._reputation.to_dict(),
+            },
+        )
 
         result = RuntimeCycleResult(
             rss_result=rss_result
@@ -848,7 +1144,7 @@ class TradingApplication:
         self._artifact_ledger.record(
             artifacts=result.artifacts,
             checkpoints=result.checkpoints,
-            summary=result.to_dict(),
+            summary=result.to_summary_dict(),
         )
         return result
 
@@ -870,6 +1166,7 @@ class TradingApplication:
                 intent,
                 agent_id=self._identity.agent_id,
             )
+            self._artifact_ledger.record_artifact(trade_artifact)
             risk_result = self._strategy.reassess_trade_intent(
                 intent=intent,
                 portfolio=working_portfolio,
@@ -881,12 +1178,40 @@ class TradingApplication:
                 proposed_notional=intent.notional_usd,
                 checked_at=intent.generated_at,
             )
+            self._artifact_ledger.record_artifact(risk_artifact)
             artifacts.extend((trade_artifact, risk_artifact))
             if not risk_result.approved:
+                self._artifact_ledger.record_action(
+                    action="execution_skipped",
+                    status="blocked",
+                    affects=("execution_queue", "portfolio", intent.symbol_id),
+                    details={
+                        "subject_id": subject_id,
+                        "allowed_notional": round(risk_result.allowed_notional, 2),
+                        "violations": [violation.code for violation in risk_result.violations],
+                    },
+                    occurred_at=intent.generated_at,
+                )
                 continue
 
             execution_result = self._executor.submit_trade_intent(intent)
             execution_results.append(execution_result)
+            self._artifact_ledger.record_action(
+                action="execution_recorded",
+                status=execution_result.status.value,
+                affects=("execution_results", "orders_audit", intent.symbol_id),
+                details={
+                    "client_order_id": execution_result.request.client_order_id,
+                    "side": intent.side,
+                    "filled_quantity": (
+                        execution_result.fill.filled_quantity
+                        if execution_result.fill is not None
+                        else 0.0
+                    ),
+                },
+                occurred_at=execution_result.completed_at,
+                count_updates={"executions": 1},
+            )
             if execution_result.fill is not None and execution_result.is_successful:
                 portfolio_before_fill = working_portfolio
                 self._portfolio_provider.record_fill(
@@ -905,10 +1230,33 @@ class TradingApplication:
                         notes=intent.rationale,
                     )
                 )
+                self._artifact_ledger.record_action(
+                    action="portfolio_updated",
+                    status="recorded",
+                    affects=("portfolio", "trade_journal", intent.symbol_id),
+                    details={
+                        "symbol_id": intent.symbol_id,
+                        "side": intent.side,
+                        "cash_usd": round(working_portfolio.cash_usd, 2),
+                        "total_equity": round(working_portfolio.total_equity, 2),
+                        "open_position_count": working_portfolio.open_position_count(),
+                    },
+                    occurred_at=execution_result.fill.filled_at,
+                    summary_updates={
+                        "portfolio": {
+                            "total_equity": working_portfolio.total_equity,
+                            "cash_usd": working_portfolio.cash_usd,
+                            "open_position_count": working_portfolio.open_position_count(),
+                            "realized_pnl_today": working_portfolio.realized_pnl_today,
+                            "as_of": working_portfolio.as_of.isoformat(),
+                        }
+                    },
+                )
             execution_artifact = ValidationArtifact.from_execution_result(
                 execution_result,
                 agent_id=self._identity.agent_id,
             )
+            self._artifact_ledger.record_artifact(execution_artifact)
             artifacts.append(execution_artifact)
 
         return execution_results, artifacts

@@ -229,7 +229,9 @@ class JsonlFileStore:
 
     def write_json(self, payload: Mapping[str, Any]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
+        temp_path = self._path.with_suffix(f"{self._path.suffix}.tmp")
+        temp_path.write_text(
             json.dumps(dict(payload), indent=2, sort_keys=True),
             encoding="utf-8",
         )
+        temp_path.replace(self._path)
