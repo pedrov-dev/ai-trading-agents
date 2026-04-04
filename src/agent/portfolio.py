@@ -57,3 +57,86 @@ class PortfolioStateProvider(Protocol):
 
     def get_portfolio_snapshot(self) -> PortfolioSnapshot:
         ...
+
+
+class LocalPortfolioStateProvider:
+    """Mutable local portfolio state used for demo and paper-trading flows."""
+
+    def __init__(
+        self,
+        *,
+        starting_equity: float = 10_000.0,
+        starting_cash_usd: float | None = None,
+    ) -> None:
+        resolved_cash = (
+            starting_equity if starting_cash_usd is None else starting_cash_usd
+        )
+        self._snapshot = PortfolioSnapshot(
+            total_equity=round(starting_equity, 2),
+            cash_usd=round(resolved_cash, 2),
+        )
+
+    def get_portfolio_snapshot(self) -> PortfolioSnapshot:
+        return self._snapshot
+
+    def record_fill(
+        self,
+        *,
+        symbol_id: str,
+        side: Literal["buy", "sell"],
+        quantity: float,
+        price: float,
+        filled_at: datetime | None = None,
+    ) -> PortfolioSnapshot:
+        if quantity <= 0 or price <= 0:
+            return self._snapshot
+
+        opened_at = filled_at or datetime.now(UTC)
+        position_side: PositionSide = "long" if side == "buy" else "short"
+        updated_positions = tuple(
+            position for position in self._snapshot.positions if position.symbol_id != symbol_id
+        ) + (
+            Position(
+                symbol_id=symbol_id,
+                side=position_side,
+                quantity=round(quantity, 8),
+                entry_price=round(price, 8),
+                opened_at=opened_at,
+            ),
+        )
+
+        notional = round(quantity * price, 2)
+        next_cash = (
+            self._snapshot.cash_usd - notional
+            if side == "buy"
+            else self._snapshot.cash_usd + notional
+        )
+        self._snapshot = PortfolioSnapshot(
+            total_equity=round(self._snapshot.total_equity, 2),
+            cash_usd=round(next_cash, 2),
+            positions=updated_positions,
+            realized_pnl_today=self._snapshot.realized_pnl_today,
+            consecutive_losses=self._snapshot.consecutive_losses,
+            last_loss_at=self._snapshot.last_loss_at,
+            as_of=opened_at,
+        )
+        return self._snapshot
+
+    def set_realized_pnl(
+        self,
+        pnl_usd: float,
+        *,
+        as_of: datetime | None = None,
+    ) -> PortfolioSnapshot:
+        observed_at = as_of or datetime.now(UTC)
+        baseline_equity = self._snapshot.total_equity - self._snapshot.realized_pnl_today
+        self._snapshot = PortfolioSnapshot(
+            total_equity=round(baseline_equity + pnl_usd, 2),
+            cash_usd=self._snapshot.cash_usd,
+            positions=self._snapshot.positions,
+            realized_pnl_today=round(pnl_usd, 2),
+            consecutive_losses=self._snapshot.consecutive_losses,
+            last_loss_at=self._snapshot.last_loss_at,
+            as_of=observed_at,
+        )
+        return self._snapshot
