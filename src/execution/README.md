@@ -16,7 +16,7 @@ Kraken CLI adapter and immutable order models for paper/live order submission.
 
 ## Integration
 
-- Runs the repo-installed `kraken-cli` subprocess; writes audit events to `artifacts/orders_audit.jsonl`; honors `dry_run`/`live_enabled` flags.
+- Runs the repo-installed `kraken-cli` subprocess; writes audit events to `artifacts/orders_audit.jsonl`; supports Kraken `paper` validation mode and Kraken `live` submission mode.
 - `pip install -r requirements-dev.txt` now installs the local console script automatically via `-e .`.
 - If `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` are set, `kraken-cli add-order --validate` can call Kraken’s private `AddOrder` validation endpoint.
 
@@ -31,7 +31,7 @@ print(result.to_dict())
 
 ## Notes
 
-- Defaults to simulated/dry-run.
-- For a live-connected **paper-only** run, use `python src/main.py --base-dir . --kraken-paper` or set `KRAKEN_EXECUTION_DRY_RUN=false`, `KRAKEN_LIVE_ENABLED=true`, and keep `KRAKEN_VALIDATE_ONLY=true` so the CLI sends `--validate` without placing a real order.
-- `src/main.py` now blocks unsafe live submission unless `KRAKEN_CLI_ALLOW_LIVE_SUBMIT=true` is explicitly set.
-- Set `KRAKEN_VALIDATE_ONLY=false` only if you intentionally want real submission with exchange credentials.
+- The app-level default is Kraken **paper** mode (`--trading-mode paper`).
+- Use `python src/main.py --base-dir . --trading-mode paper` for exchange-backed validation without placing a real order.
+- Use `python src/main.py --base-dir . --trading-mode live` only when you intentionally want real submission and have set `KRAKEN_CLI_ALLOW_LIVE_SUBMIT=true` plus exchange credentials.
+- `src/main.py` blocks unsafe live submission unless `KRAKEN_CLI_ALLOW_LIVE_SUBMIT=true` is explicitly set.

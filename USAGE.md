@@ -19,17 +19,17 @@ python src/main.py --help
 
 ---
 
-## 2) Mode A — Local one-shot dry run
+## 2) Mode A — Kraken Paper Trading
 
-Use this for the default, safest demo run.
+This is the default and safest mode. Orders go through Kraken's validation path and are **not** submitted live.
 
 1. Activate the environment.
-2. Run one complete ingest → detect → strategy → execution cycle.
-3. Inspect the generated artifacts.
+2. Optionally put `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` in `.env` if you want Kraken's private `AddOrder` validation endpoint.
+3. Run one complete ingest → detect → strategy → execution cycle.
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-python src/main.py --base-dir .
+python src/main.py --base-dir . --trading-mode paper
 ```
 
 Artifacts written after the run:
@@ -39,24 +39,43 @@ Artifacts written after the run:
 - `artifacts/validation_artifacts.jsonl`
 - `artifacts/validation_checkpoints.jsonl`
 
+> Check the `execution_config` block in the output. It should show `trading_mode: paper`, `live_connected_paper_trading: true`, and `will_submit_real_orders: false`.
+
 ---
 
-## 3) Mode B — Local scheduler service
+## 3) Mode B — Kraken Live Trading
 
-Use this to keep the pipeline running continuously.
+Use this only when you intentionally want real live order submission.
 
-1. Start the service.
-2. Stop it with `Ctrl+C` when you are done.
+1. Activate the environment.
+2. Set `KRAKEN_API_KEY`, `KRAKEN_API_SECRET`, and `KRAKEN_CLI_ALLOW_LIVE_SUBMIT=true`.
+3. Run the live mode explicitly.
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-python src/main.py --base-dir . --serve
+$env:KRAKEN_API_KEY = "..."
+$env:KRAKEN_API_SECRET = "..."
+$env:KRAKEN_CLI_ALLOW_LIVE_SUBMIT = "true"
+python src/main.py --base-dir . --trading-mode live
+```
+
+> The app blocks live trading unless `KRAKEN_CLI_ALLOW_LIVE_SUBMIT=true` is present.
+
+---
+
+## 4) Optional scheduler service
+
+Use this to keep the pipeline running continuously in either paper or live mode.
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python src/main.py --base-dir . --trading-mode paper --serve
 ```
 
 Optional custom intervals:
 
 ```powershell
-python src/main.py --base-dir . --serve `
+python src/main.py --base-dir . --trading-mode paper --serve `
   --rss-interval-seconds 120 `
   --prices-interval-seconds 60 `
   --detection-interval-seconds 60 `
@@ -65,59 +84,24 @@ python src/main.py --base-dir . --serve `
 
 ---
 
-## 4) Mode C — Live-connected Kraken paper trading
+## 5) Optional ERC-8004 identity layer
 
-Use this to reach Kraken in **paper-only validation mode** without placing a real order.
-
-1. Activate the environment.
-2. Put `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` in `.env` if you want the repo-installed `kraken-cli` to call Kraken’s private `AddOrder` validation endpoint.
-3. Run the safe paper-mode flag.
+Use this when you want the shared Sepolia identity / reputation / validation flow on top of either Kraken trading mode.
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-python src/main.py --base-dir . --kraken-paper
-```
-
-Optional shell overrides if you do not want to use `.env`:
-
-```powershell
-$env:KRAKEN_API_KEY = "..."
-$env:KRAKEN_API_SECRET = "..."
-python src/main.py --base-dir . --kraken-paper
-```
-
-> `--kraken-paper` forces `KRAKEN_EXECUTION_DRY_RUN=false`, `KRAKEN_LIVE_ENABLED=true`, and `KRAKEN_VALIDATE_ONLY=true` for the current run.
->
-> The output now includes an `execution_config` block so you can confirm `live_connected_paper_trading=true` and `will_submit_real_orders=false` before trusting the run.
-
----
-
-## 5) Mode D — Shared Sepolia status run
-
-Use this to run the app against the shared ERC-8004 Sepolia setup without sending optional transactions.
-
-1. Open `.env.example` and copy the shared-contract values into your shell or env loader.
-2. Set the required Sepolia variables.
-3. Run the one-shot Sepolia cycle.
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-$env:TRADING_RUNTIME_MODE = "sepolia"
+$env:IDENTITY_LAYER = "erc8004"
 $env:SEPOLIA_RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com"
 $env:SEPOLIA_CHAIN_ID = "11155111"
-# Set the five shared contract addresses from `.env.example`
-python src/main.py --runtime-mode sepolia --base-dir .
+# Set the shared contract addresses from `.env.example`
+python src/main.py --base-dir . --trading-mode paper --identity-layer erc8004
 ```
 
 ---
 
-## 6) Mode E — Shared Sepolia on-chain actions
+## 6) Optional ERC-8004 on-chain actions
 
 Use this when you want to register the agent, claim the allocation, submit intents, or post checkpoints.
-
-1. Complete all variables from **Mode D**.
-2. Add the required signing keys and optional agent profile values.
-3. Run the specific action you need.
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
@@ -130,11 +114,11 @@ $env:AGENT_STRATEGY_NAME = "simple_event_driven"
 Available commands:
 
 ```powershell
-python src/main.py --runtime-mode sepolia --base-dir . --register-agent
-python src/main.py --runtime-mode sepolia --base-dir . --claim-allocation
-python src/main.py --runtime-mode sepolia --base-dir . --submit-onchain
-python src/main.py --runtime-mode sepolia --base-dir . --post-checkpoints
-python src/main.py --runtime-mode sepolia --base-dir . --full-flow
+python src/main.py --base-dir . --trading-mode paper --identity-layer erc8004 --register-agent
+python src/main.py --base-dir . --trading-mode paper --identity-layer erc8004 --claim-allocation
+python src/main.py --base-dir . --trading-mode paper --identity-layer erc8004 --submit-onchain
+python src/main.py --base-dir . --trading-mode paper --identity-layer erc8004 --post-checkpoints
+python src/main.py --base-dir . --trading-mode paper --identity-layer erc8004 --full-flow
 ```
 
 If registration succeeds, the numeric `AGENT_ID` is persisted to `.runtime.env` for reuse.
@@ -144,5 +128,5 @@ If registration succeeds, the numeric `AGENT_ID` is persisted to `.runtime.env` 
 ## Quick troubleshooting
 
 - Check all CLI options with `python src/main.py --help`.
-- If Sepolia mode reports missing config, export the required variables first.
+- If the ERC-8004 layer reports missing config, export the required variables first.
 - `--serve` cannot be combined with the on-chain action flags.

@@ -30,7 +30,7 @@ def test_local_portfolio_provider_keeps_equity_stable_when_opening_short() -> No
     assert snapshot.positions[0].side == "short"
 
 
-def test_local_demo_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Path) -> None:
+def test_kraken_paper_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Path) -> None:
     def fake_parse_feed(_url: str) -> dict[str, object]:
         return {
             "entries": [
@@ -67,11 +67,8 @@ def test_local_demo_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Path
         symbols=[BTC_SYMBOL],
         parse_feed=fake_parse_feed,
         http_get=fake_http_get,
-        env={
-            "KRAKEN_EXECUTION_DRY_RUN": "true",
-            "KRAKEN_LIVE_ENABLED": "false",
-            "KRAKEN_VALIDATE_ONLY": "true",
-        },
+        env={},
+        trading_mode="paper",
     )
 
     result = app.run_cycle(feed_group="market_news")
@@ -82,11 +79,11 @@ def test_local_demo_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Path
     assert len(result.detected_events) >= 1
     assert len(result.trade_intents) == 1
     assert len(result.execution_results) == 1
-    assert result.execution_results[0].status.value == "simulated"
+    assert result.execution_results[0].status.value == "validated"
     assert result.artifact_count >= 4
     assert result.checkpoint_count >= 4
     assert result.audit_summary.total_events >= 2
-    assert result.portfolio.open_position_count() == 1
+    assert result.portfolio.open_position_count() == 0
 
     assert (tmp_path / "artifacts" / "orders_audit.jsonl").exists()
     assert (tmp_path / "artifacts" / "validation_artifacts.jsonl").exists()
@@ -155,50 +152,49 @@ def test_shared_contract_status_includes_balance_and_claim_state() -> None:
     assert status["vault_balance_wei"] == 50_000_000_000_000_000
 
 
-def test_build_local_demo_app_uses_env_execution_config(tmp_path: Path) -> None:
+def test_build_local_demo_app_defaults_to_kraken_paper_mode(tmp_path: Path) -> None:
     app = build_local_demo_app(
         base_dir=tmp_path,
-        env={
-            "KRAKEN_EXECUTION_DRY_RUN": "false",
-            "KRAKEN_LIVE_ENABLED": "true",
-            "KRAKEN_CLI_TIMEOUT_SECONDS": "21",
-        },
+        env={"KRAKEN_CLI_TIMEOUT_SECONDS": "21"},
     )
 
     assert app._executor._config.dry_run is False
     assert app._executor._config.live_enabled is True
+    assert app._executor._config.validate_only is True
     assert app._executor._config.timeout_seconds == 21
     assert app._executor._config.audit_log_path == tmp_path / "artifacts" / "orders_audit.jsonl"
 
 
-def test_build_local_demo_app_supports_kraken_paper_mode(tmp_path: Path) -> None:
-    app = build_local_demo_app(base_dir=tmp_path, env={}, kraken_paper=True)
+def test_build_local_demo_app_supports_kraken_live_mode(tmp_path: Path) -> None:
+    app = build_local_demo_app(
+        base_dir=tmp_path,
+        env={"KRAKEN_CLI_ALLOW_LIVE_SUBMIT": "true"},
+        trading_mode="live",
+    )
 
     assert app._executor._config.dry_run is False
     assert app._executor._config.live_enabled is True
-    assert app._executor._config.validate_only is True
+    assert app._executor._config.validate_only is False
     assert app._executor._config.audit_log_path == tmp_path / "artifacts" / "orders_audit.jsonl"
 
 
 def test_validate_runtime_requirements_blocks_live_submit_without_opt_in(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(ValueError, match="paper-only"):
+    with pytest.raises(ValueError, match="KRAKEN_CLI_ALLOW_LIVE_SUBMIT"):
         validate_runtime_requirements(
-            runtime_mode="local",
+            trading_mode="live",
+            identity_layer="none",
             base_dir=tmp_path,
-            env={
-                "KRAKEN_EXECUTION_DRY_RUN": "false",
-                "KRAKEN_LIVE_ENABLED": "true",
-                "KRAKEN_VALIDATE_ONLY": "false",
-            },
+            env={},
         )
 
 
-def test_validate_runtime_requirements_blocks_missing_sepolia_keys(tmp_path: Path) -> None:
+def test_validate_runtime_requirements_blocks_missing_erc8004_keys(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="PRIVATE_KEY"):
         validate_runtime_requirements(
-            runtime_mode="sepolia",
+            trading_mode="paper",
+            identity_layer="erc8004",
             base_dir=tmp_path,
             env={"SEPOLIA_RPC_URL": "https://ethereum-sepolia-rpc.publicnode.com"},
             require_transaction_keys=True,

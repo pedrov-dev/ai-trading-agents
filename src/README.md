@@ -1,6 +1,6 @@
 # Top-level entrypoints
 
-Local dry-run harness and lightweight scheduler for running ingestion, detection, strategy, and execution flows.
+Kraken paper/live harness and lightweight scheduler for running ingestion, detection, strategy, and execution flows.
 
 ## Top-level scripts
 
@@ -12,9 +12,9 @@ Local dry-run harness and lightweight scheduler for running ingestion, detection
 Typical invocations:
 
 ```powershell
-python -m src.main --base-dir ./artifacts --feed-group market_news
-python -m src.main --serve --rss-interval-seconds 120 --prices-interval-seconds 60
-python -m src.main --runtime-mode sepolia --full-flow
+python -m src.main --base-dir ./artifacts --feed-group market_news --trading-mode paper
+python -m src.main --serve --trading-mode paper --rss-interval-seconds 120 --prices-interval-seconds 60
+python -m src.main --trading-mode paper --identity-layer erc8004 --full-flow
 ```
 
 ## Integration
@@ -23,4 +23,4 @@ python -m src.main --runtime-mode sepolia --full-flow
 
 ## Notes
 
-- Honors `TRADING_RUNTIME_MODE`, `AGENT_*`, `KRAKEN_AUDIT_LOG_PATH`; persists runtime artifacts under the provided `--base-dir`.
+- Honors `TRADING_MODE`, `IDENTITY_LAYER`, `AGENT_*`, and `KRAKEN_AUDIT_LOG_PATH`; persists runtime artifacts under the provided `--base-dir`.
