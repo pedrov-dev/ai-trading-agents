@@ -213,6 +213,7 @@ class TradingApplication:
         identity_registry: IdentityRegistry | None = None,
         execution_config: KrakenCLIConfig | None = None,
         execution_runner: CommandRunner | None = None,
+        runtime_env: Mapping[str, str] | None = None,
         runtime_mode: str = "local",
         trading_mode: str = "paper",
         identity_layer: str = "none",
@@ -260,6 +261,7 @@ class TradingApplication:
         self._executor = KrakenCLIExecutor(
             config=resolved_execution_config,
             runner=execution_runner,
+            env=runtime_env,
         )
         self._portfolio_provider = LocalPortfolioStateProvider(
             starting_equity=10_000.0,
@@ -1016,6 +1018,7 @@ def build_local_demo_app(
         ),
         execution_config=execution_config or _build_execution_config(paths=paths, env=runtime_env),
         execution_runner=execution_runner,
+        runtime_env=runtime_env,
         runtime_mode=resolved_runtime_mode,
         trading_mode=resolved_trading_mode,
         identity_layer=resolved_identity_layer,

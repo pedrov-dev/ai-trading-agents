@@ -7,6 +7,7 @@ from execution.kraken_cli import (
     CommandRunResult,
     KrakenCLIConfig,
     KrakenCLIExecutor,
+    _build_private_order_payload,
     _default_cli_executable,
 )
 from execution.kraken_cli import (
@@ -229,3 +230,62 @@ def test_kraken_cli_main_live_submit_requires_api_credentials(capsys, monkeypatc
     assert exit_code == 2
     assert "KRAKEN_API_KEY" in captured.err
     assert "KRAKEN_API_SECRET" in captured.err
+
+
+def test_build_private_order_payload_normalizes_slash_pair_for_private_api() -> None:
+    args = type(
+        "Args",
+        (),
+        {
+            "pair": "XBT/USD",
+            "side": "buy",
+            "order_type": "market",
+            "volume": "0.01",
+            "validate": True,
+            "price": None,
+        },
+    )()
+
+    payload = _build_private_order_payload(args)
+
+    assert payload["pair"] == "XBTUSD"
+
+
+def test_executor_default_runner_receives_runtime_env(tmp_path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_command(
+        command: tuple[str, ...],
+        timeout_seconds: int,
+        *,
+        env: dict[str, str] | None = None,
+    ) -> CommandRunResult:
+        captured["command"] = command
+        captured["timeout_seconds"] = timeout_seconds
+        captured["env"] = env
+        return CommandRunResult(exit_code=0, stdout='{"result": "validated"}', stderr="")
+
+    monkeypatch.setattr("execution.kraken_cli._run_command", fake_run_command)
+
+    executor = KrakenCLIExecutor(
+        config=KrakenCLIConfig(
+            executable="kraken-cli",
+            dry_run=False,
+            live_enabled=True,
+            validate_only=True,
+            timeout_seconds=15,
+            audit_log_path=tmp_path / "orders.jsonl",
+        ),
+        env={
+            "KRAKEN_API_KEY": "demo-key",
+            "KRAKEN_API_SECRET": "demo-secret",
+        },
+    )
+
+    result = executor.submit_trade_intent(_make_intent())
+
+    assert result.status == OrderStatus.VALIDATED
+    assert captured["timeout_seconds"] == 15
+    assert captured["env"] is not None
+    assert captured["env"]["KRAKEN_API_KEY"] == "demo-key"
+    assert captured["env"]["KRAKEN_API_SECRET"] == "demo-secret"

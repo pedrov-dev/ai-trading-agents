@@ -132,9 +132,20 @@ class KrakenCLIExecutor:
         config: KrakenCLIConfig | None = None,
         runner: CommandRunner | None = None,
         now_provider: Callable[[], datetime] | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> None:
         self._config = config or KrakenCLIConfig.from_env()
-        self._runner = runner or _run_command
+        resolved_env = {key: str(value) for key, value in os.environ.items()}
+        if env is not None:
+            resolved_env.update({key: str(value) for key, value in env.items()})
+        self._env = resolved_env
+        self._runner = runner or (
+            lambda command, timeout_seconds: _run_command(
+                command,
+                timeout_seconds,
+                env=self._env,
+            )
+        )
         self._now_provider = now_provider or (lambda: datetime.now(UTC))
 
     def build_command(self, intent_or_request: TradeIntent | OrderRequest) -> tuple[str, ...]:
@@ -368,7 +379,12 @@ class KrakenCLIExecutor:
             handle.write(json.dumps(entry, sort_keys=True) + "\n")
 
 
-def _run_command(command: tuple[str, ...], timeout_seconds: int) -> CommandRunResult:
+def _run_command(
+    command: tuple[str, ...],
+    timeout_seconds: int,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> CommandRunResult:
     """Execute one CLI command and capture its output safely."""
     try:
         completed = subprocess.run(
@@ -377,6 +393,7 @@ def _run_command(command: tuple[str, ...], timeout_seconds: int) -> CommandRunRe
             text=True,
             timeout=timeout_seconds,
             check=False,
+            env=dict(env) if env is not None else None,
         )
     except FileNotFoundError as exc:
         return CommandRunResult(exit_code=127, stdout="", stderr=str(exc))
@@ -456,7 +473,11 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         "add-order",
         help="Validate or submit one Kraken spot order.",
     )
-    add_order.add_argument("--pair", required=True, help="Kraken pair like XBT/USD")
+    add_order.add_argument(
+        "--pair",
+        required=True,
+        help="Kraken pair like XBT/USD or XBTUSD",
+    )
     add_order.add_argument("--side", required=True, choices=("buy", "sell"))
     add_order.add_argument(
         "--type",
@@ -478,8 +499,8 @@ def _build_cli_parser() -> argparse.ArgumentParser:
 
 def _validate_cli_inputs(*, pair: str, side: str, order_type: str, volume: str) -> float:
     normalized_pair = pair.strip()
-    if "/" not in normalized_pair:
-        raise ValueError("`--pair` must look like XBT/USD.")
+    if not normalized_pair or ("/" not in normalized_pair and len(normalized_pair) < 6):
+        raise ValueError("`--pair` must look like XBT/USD or XBTUSD.")
     if side not in {"buy", "sell"}:
         raise ValueError("`--side` must be `buy` or `sell`.")
     if order_type not in {"market", "limit"}:
@@ -501,10 +522,27 @@ def _has_private_api_credentials(env: Mapping[str, str]) -> bool:
     )
 
 
+def _normalize_private_api_pair(pair: str) -> str:
+    normalized = pair.strip().upper()
+    aliases = {
+        "BTC/USD": "XBTUSD",
+        "BTCUSD": "XBTUSD",
+        "XBT/USD": "XBTUSD",
+        "ETH/USD": "ETHUSD",
+        "SOL/USD": "SOLUSD",
+        "XRP/USD": "XRPUSD",
+    }
+    if normalized in aliases:
+        return aliases[normalized]
+    if "/" in normalized:
+        return normalized.replace("/", "")
+    return normalized
+
+
 def _build_private_order_payload(args: argparse.Namespace) -> dict[str, str]:
     payload = {
         "nonce": str(int(time.time() * 1000)),
-        "pair": args.pair,
+        "pair": _normalize_private_api_pair(args.pair),
         "type": args.side,
         "ordertype": args.order_type,
         "volume": args.volume,
