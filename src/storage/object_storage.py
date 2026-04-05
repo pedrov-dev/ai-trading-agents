@@ -184,12 +184,15 @@ class S3CompatibleObjectStore:
         """Create a boto3 S3 client configured for local S3 or Cloudflare R2."""
 
         boto3_module = importlib.import_module("boto3")
-        s3_client = boto3_module.client(
-            "s3",
-            endpoint=config.endpoint,
-            aws_access_key=config.access_key,
-            aws_secret_key=config.secret_key,
-        )
+        client_kwargs: dict[str, Any] = {
+            "endpoint_url": config.endpoint,
+            "aws_access_key_id": config.access_key,
+            "aws_secret_access_key": config.secret_key,
+        }
+        if config.region and config.region != "auto":
+            client_kwargs["region_name"] = config.region
+
+        s3_client = boto3_module.client("s3", **client_kwargs)
         return cls(s3_client=s3_client, bucket=config.bucket)
 
     def put_json_gzip(

@@ -14,9 +14,24 @@ from ingestion.prices_config import PRICE_SYMBOLS
 from ingestion.prices_ingestion import PriceQuote
 from ingestion.rss_config import FeedSource
 from main import build_local_demo_app, build_runtime_preflight, validate_runtime_requirements
+from storage.local_runtime import (
+    InMemoryEventDetectionRepository,
+    InMemoryIngestionRunsRepository,
+    InMemoryRawEventsRepository,
+    LocalFileObjectStore,
+)
 from storage.raw_postgres import PostgresIngestionRunsRepository, PostgresRawEventsRepository
 
 BTC_SYMBOL = next(symbol for symbol in PRICE_SYMBOLS if symbol.symbol_id == "btc_usd")
+
+
+def _storage_overrides(tmp_path: Path) -> dict[str, object]:
+    return {
+        "runs_repository": InMemoryIngestionRunsRepository(),
+        "raw_events_repository": InMemoryRawEventsRepository(),
+        "event_repository": InMemoryEventDetectionRepository(),
+        "object_store": LocalFileObjectStore(tmp_path / "artifacts" / "raw_payloads"),
+    }
 
 
 def test_local_portfolio_provider_keeps_equity_stable_when_opening_short() -> None:
@@ -112,6 +127,7 @@ def test_kraken_paper_app_closes_open_position_on_take_profit(tmp_path: Path) ->
             validate_only=True,
             audit_log_path=tmp_path / "artifacts" / "orders_audit.jsonl",
         ),
+        **_storage_overrides(tmp_path),
     )
     app._portfolio_provider.record_fill(
         symbol_id="btc_usd",
@@ -205,6 +221,7 @@ def test_kraken_paper_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Pa
             validate_only=True,
             audit_log_path=tmp_path / "artifacts" / "orders_audit.jsonl",
         ),
+        **_storage_overrides(tmp_path),
     )
 
     result = app.run_cycle(feed_group="market_news")
@@ -292,6 +309,7 @@ def test_run_cycle_writes_incremental_action_log_and_summary_state(tmp_path: Pat
             validate_only=True,
             audit_log_path=tmp_path / "artifacts" / "orders_audit.jsonl",
         ),
+        **_storage_overrides(tmp_path),
     )
 
     result = app.run_cycle(feed_group="market_news")
@@ -384,6 +402,7 @@ def test_local_demo_app_restores_portfolio_from_trade_journal(tmp_path: Path) ->
             validate_only=True,
             audit_log_path=tmp_path / "artifacts" / "orders_audit.jsonl",
         ),
+        **_storage_overrides(tmp_path),
     )
 
     first_result = first_app.run_cycle(feed_group="market_news")
@@ -402,6 +421,7 @@ def test_local_demo_app_restores_portfolio_from_trade_journal(tmp_path: Path) ->
             validate_only=True,
             audit_log_path=tmp_path / "artifacts" / "orders_audit.jsonl",
         ),
+        **_storage_overrides(tmp_path),
     )
 
     restored_portfolio = restored_app._portfolio_provider.get_portfolio_snapshot()
@@ -423,6 +443,7 @@ def test_local_demo_app_uses_env_agent_profile(tmp_path: Path) -> None:
             "AGENT_URI": "https://example.test/agent.json",
             "AGENT_CAPABILITIES": "trading,eip712-signing,checkpoints",
         },
+        **_storage_overrides(tmp_path),
     )
 
     assert app.identity.display_name == "Sepolia Momentum Bot"
@@ -432,7 +453,11 @@ def test_local_demo_app_uses_env_agent_profile(tmp_path: Path) -> None:
 
 
 def test_local_demo_app_persists_agent_id_env_file(tmp_path: Path) -> None:
-    app = build_local_demo_app(base_dir=tmp_path, identity_layer="erc8004")
+    app = build_local_demo_app(
+        base_dir=tmp_path,
+        identity_layer="erc8004",
+        **_storage_overrides(tmp_path),
+    )
     env_path = tmp_path / ".runtime.env"
 
     app.persist_agent_id(agent_id=77, env_path=env_path)
@@ -443,7 +468,7 @@ def test_local_demo_app_persists_agent_id_env_file(tmp_path: Path) -> None:
 
 
 def test_shared_contract_status_includes_balance_and_claim_state() -> None:
-    app = build_local_demo_app(base_dir=Path("."))
+    app = build_local_demo_app(base_dir=Path("."), **_storage_overrides(Path(".")))
     app._shared_contract_config = SepoliaContractsConfig(agent_id=42)
 
     class _VaultClient:
@@ -475,6 +500,19 @@ def test_shared_contract_status_includes_balance_and_claim_state() -> None:
     assert status["vault_balance_wei"] == 50_000_000_000_000_000
 
 
+def test_build_local_demo_app_requires_external_storage_by_default(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="Postgres storage is required"):
+        build_local_demo_app(
+            base_dir=tmp_path,
+            env={
+                "KRAKEN_API_KEY": "demo-key",
+                "KRAKEN_API_SECRET": "demo-secret",
+            },
+        )
+
+
 def test_build_local_demo_app_defaults_to_kraken_paper_mode(tmp_path: Path) -> None:
     app = build_local_demo_app(
         base_dir=tmp_path,
@@ -483,6 +521,7 @@ def test_build_local_demo_app_defaults_to_kraken_paper_mode(tmp_path: Path) -> N
             "KRAKEN_API_KEY": "demo-key",
             "KRAKEN_API_SECRET": "demo-secret",
         },
+        **_storage_overrides(tmp_path),
     )
 
     assert app._executor._config.dry_run is False
@@ -500,6 +539,10 @@ def test_build_local_demo_app_uses_postgres_repositories_when_database_configure
         env={
             "POSTGRES_ENABLED": "true",
             "DATABASE_URL": "postgresql://demo:demo@localhost:5432/ai_trading",
+            "CF_R2_BUCKET": "demo-bucket",
+            "CF_R2_ENDPOINT": "https://example.r2.cloudflarestorage.com",
+            "CF_R2_ACCESS_KEY": "demo-access",
+            "CF_R2_SECRET_KEY": "demo-secret-key",
             "KRAKEN_API_KEY": "demo-key",
             "KRAKEN_API_SECRET": "demo-secret",
         },
@@ -515,6 +558,7 @@ def test_build_local_demo_app_supports_kraken_live_mode(tmp_path: Path) -> None:
         base_dir=tmp_path,
         env={"KRAKEN_CLI_ALLOW_LIVE_SUBMIT": "true"},
         trading_mode="live",
+        **_storage_overrides(tmp_path),
     )
 
     assert app._executor._config.dry_run is False
@@ -532,6 +576,12 @@ def test_validate_runtime_requirements_blocks_live_submit_without_opt_in(
             identity_layer="none",
             base_dir=tmp_path,
             env={
+                "POSTGRES_ENABLED": "true",
+                "DATABASE_URL": "postgresql://demo:demo@localhost:5432/ai_trading",
+                "CF_R2_BUCKET": "demo-bucket",
+                "CF_R2_ENDPOINT": "https://example.r2.cloudflarestorage.com",
+                "CF_R2_ACCESS_KEY": "demo-access",
+                "CF_R2_SECRET_KEY": "demo-secret-key",
                 "KRAKEN_API_KEY": "demo-key",
                 "KRAKEN_API_SECRET": "demo-secret",
             },
@@ -546,7 +596,14 @@ def test_validate_runtime_requirements_blocks_paper_without_kraken_credentials(
             trading_mode="paper",
             identity_layer="none",
             base_dir=tmp_path,
-            env={},
+            env={
+                "POSTGRES_ENABLED": "true",
+                "DATABASE_URL": "postgresql://demo:demo@localhost:5432/ai_trading",
+                "CF_R2_BUCKET": "demo-bucket",
+                "CF_R2_ENDPOINT": "https://example.r2.cloudflarestorage.com",
+                "CF_R2_ACCESS_KEY": "demo-access",
+                "CF_R2_SECRET_KEY": "demo-secret-key",
+            },
         )
 
 
@@ -557,6 +614,12 @@ def test_validate_runtime_requirements_blocks_missing_erc8004_keys(tmp_path: Pat
             identity_layer="erc8004",
             base_dir=tmp_path,
             env={
+                "POSTGRES_ENABLED": "true",
+                "DATABASE_URL": "postgresql://demo:demo@localhost:5432/ai_trading",
+                "CF_R2_BUCKET": "demo-bucket",
+                "CF_R2_ENDPOINT": "https://example.r2.cloudflarestorage.com",
+                "CF_R2_ACCESS_KEY": "demo-access",
+                "CF_R2_SECRET_KEY": "demo-secret-key",
                 "SEPOLIA_RPC_URL": "https://ethereum-sepolia-rpc.publicnode.com",
                 "KRAKEN_API_KEY": "demo-key",
                 "KRAKEN_API_SECRET": "demo-secret",
@@ -565,7 +628,9 @@ def test_validate_runtime_requirements_blocks_missing_erc8004_keys(tmp_path: Pat
         )
 
 
-def test_build_runtime_preflight_reports_ready_paper_mode(tmp_path: Path) -> None:
+def test_build_runtime_preflight_reports_storage_blockers_when_not_configured(
+    tmp_path: Path,
+) -> None:
     report = build_runtime_preflight(
         trading_mode="paper",
         identity_layer="none",
@@ -576,9 +641,9 @@ def test_build_runtime_preflight_reports_ready_paper_mode(tmp_path: Path) -> Non
         },
     )
 
-    assert report["status"] == "ready"
-    assert report["checks"]["kraken_credentials_present"] is True
-    assert report["checks"]["will_submit_real_orders"] is False
+    assert report["status"] == "error"
+    assert any("Postgres storage is required" in issue for issue in report["issues"])
+    assert any("R2" in issue or "object storage" in issue for issue in report["issues"])
 
 
 def test_build_runtime_preflight_reports_live_mode_blockers(tmp_path: Path) -> None:
@@ -586,7 +651,14 @@ def test_build_runtime_preflight_reports_live_mode_blockers(tmp_path: Path) -> N
         trading_mode="live",
         identity_layer="none",
         base_dir=tmp_path,
-        env={},
+        env={
+            "POSTGRES_ENABLED": "true",
+            "DATABASE_URL": "postgresql://demo:demo@localhost:5432/ai_trading",
+            "CF_R2_BUCKET": "demo-bucket",
+            "CF_R2_ENDPOINT": "https://example.r2.cloudflarestorage.com",
+            "CF_R2_ACCESS_KEY": "demo-access",
+            "CF_R2_SECRET_KEY": "demo-secret-key",
+        },
     )
 
     assert report["status"] == "error"
@@ -596,7 +668,7 @@ def test_build_runtime_preflight_reports_live_mode_blockers(tmp_path: Path) -> N
 def test_execute_trade_cycle_skips_execution_when_runtime_risk_recheck_fails(
     tmp_path: Path,
 ) -> None:
-    app = build_local_demo_app(base_dir=tmp_path)
+    app = build_local_demo_app(base_dir=tmp_path, **_storage_overrides(tmp_path))
 
     class _AlwaysIntentStrategy:
         def generate_trade_intents(self, **_: object) -> list[TradeIntent]:

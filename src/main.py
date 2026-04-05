@@ -17,7 +17,10 @@ from agent.portfolio import LocalPortfolioStateProvider, PortfolioSnapshot
 from agent.signals import TradeIntent
 from agent.strategy import SimpleEventDrivenStrategy
 from detection.event_detection import DetectedEvent, RuleBasedEventDetector
-from detection.event_detection_postgres import PostgresEventDetectionRepository
+from detection.event_detection_postgres import (
+    EventDetectionRepository,
+    PostgresEventDetectionRepository,
+)
 from detection.event_detection_service import EventDetectionService
 from execution.kraken_cli import (
     DEFAULT_AUDIT_LOG_PATH,
@@ -53,16 +56,14 @@ from monitoring.trade_journal import (
     TradeJournalEntry,
     TradeJournalSummary,
 )
-from storage.local_runtime import (
-    InMemoryEventDetectionRepository,
-    InMemoryIngestionRunsRepository,
-    InMemoryRawEventsRepository,
-    JsonlFileStore,
-    LocalFileObjectStore,
-)
+from storage.local_runtime import JsonlFileStore
+from storage.object_storage import ObjectStorageConfig, S3CompatibleObjectStore
 from storage.raw_ingestion import (
     IngestionRunResult,
+    IngestionRunsRepository,
     PricesRawIngestionPipeline,
+    RawEventsRepository,
+    RawObjectStore,
     RSSRawIngestionPipeline,
 )
 from storage.raw_postgres import (
@@ -623,25 +624,39 @@ class TradingApplication:
         agent_strategy_name: str = "simple_event_driven",
         agent_owner: str | None = None,
         agent_metadata: Mapping[str, str] | None = None,
+        runs_repository: IngestionRunsRepository | None = None,
+        raw_events_repository: RawEventsRepository | None = None,
+        event_repository: EventDetectionRepository | None = None,
+        object_store: RawObjectStore | None = None,
     ) -> None:
         self.paths = paths
         self._scheduler = scheduler or InfoScheduler()
         resolved_runtime_env = {
             key: str(value) for key, value in (runtime_env or {}).items()
         }
-        connection_factory = postgres_connection_factory_from_env(resolved_runtime_env)
-        self._storage_backend = "postgres" if connection_factory is not None else "local"
-        self._runs_repository = (
-            PostgresIngestionRunsRepository(connection_factory)
-            if connection_factory is not None
-            else InMemoryIngestionRunsRepository()
+        has_storage_overrides = _storage_overrides_provided(
+            runs_repository=runs_repository,
+            raw_events_repository=raw_events_repository,
+            event_repository=event_repository,
+            object_store=object_store,
         )
-        self._raw_events_repository = (
-            PostgresRawEventsRepository(connection_factory)
-            if connection_factory is not None
-            else InMemoryRawEventsRepository()
-        )
-        self._object_store = LocalFileObjectStore(paths.raw_payload_dir)
+        if has_storage_overrides:
+            self._storage_backend = "explicit_override"
+            self._runs_repository = cast(IngestionRunsRepository, runs_repository)
+            self._raw_events_repository = cast(RawEventsRepository, raw_events_repository)
+            self._event_repository = cast(EventDetectionRepository, event_repository)
+            self._object_store = cast(RawObjectStore, object_store)
+        else:
+            (
+                self._storage_backend,
+                self._runs_repository,
+                self._raw_events_repository,
+                self._event_repository,
+            ) = _require_postgres_storage(resolved_runtime_env)
+            self._object_store = _require_object_store(
+                resolved_runtime_env,
+                env_path=paths.base_dir / ".env",
+            )
         self._rss_pipeline = RSSRawIngestionPipeline(
             runs_repository=self._runs_repository,
             raw_events_repository=self._raw_events_repository,
@@ -659,11 +674,6 @@ class TradingApplication:
         self._prices_service = PricesIngestionService(
             symbols=symbols,
             http_get=http_get,
-        )
-        self._event_repository = (
-            PostgresEventDetectionRepository(connection_factory)
-            if connection_factory is not None
-            else InMemoryEventDetectionRepository()
         )
         self._detection_service = EventDetectionService(
             detector=RuleBasedEventDetector(),
@@ -771,7 +781,13 @@ class TradingApplication:
                 config.live_enabled and not config.dry_run and not config.validate_only
             ),
             "storage_backend": self._storage_backend,
-            "object_store_backend": "local_files",
+            "object_store_backend": (
+                "r2"
+                if isinstance(self._object_store, S3CompatibleObjectStore)
+                else "explicit_override"
+                if self._storage_backend == "explicit_override"
+                else "unknown"
+            ),
         }
 
     def _initialize_identity(self, registry: IdentityRegistry) -> AgentIdentity:
@@ -1559,6 +1575,76 @@ def _load_agent_profile(env: Mapping[str, str] | None, runtime_mode: str) -> dic
     }
 
 
+def _storage_overrides_provided(
+    *,
+    runs_repository: IngestionRunsRepository | None,
+    raw_events_repository: RawEventsRepository | None,
+    event_repository: EventDetectionRepository | None,
+    object_store: RawObjectStore | None,
+) -> bool:
+    components = {
+        "runs_repository": runs_repository,
+        "raw_events_repository": raw_events_repository,
+        "event_repository": event_repository,
+        "object_store": object_store,
+    }
+    provided = [name for name, value in components.items() if value is not None]
+    if not provided:
+        return False
+
+    missing = [name for name, value in components.items() if value is None]
+    if missing:
+        raise ValueError(
+            "Storage overrides must include runs_repository, raw_events_repository, "
+            "event_repository, and object_store together."
+        )
+    return True
+
+
+def _require_postgres_storage(
+    env: Mapping[str, str] | None,
+) -> tuple[
+    str,
+    PostgresIngestionRunsRepository,
+    PostgresRawEventsRepository,
+    EventDetectionRepository,
+]:
+    resolved_env = dict(env or {})
+    connection_factory = postgres_connection_factory_from_env(resolved_env)
+    if connection_factory is None:
+        raise ValueError(
+            "Postgres storage is required. Set POSTGRES_ENABLED=true and configure "
+            "DATABASE_URL or POSTGRES_* before starting the trading runtime."
+        )
+
+    return (
+        "postgres",
+        PostgresIngestionRunsRepository(connection_factory),
+        PostgresRawEventsRepository(connection_factory),
+        PostgresEventDetectionRepository(connection_factory),
+    )
+
+
+def _require_object_store(
+    env: Mapping[str, str] | None,
+    *,
+    env_path: Path | None = None,
+) -> RawObjectStore:
+    resolved_env = dict(env or {})
+    try:
+        config = ObjectStorageConfig.from_env(
+            env=resolved_env,
+            env_path=env_path or (ROOT_DIR / ".env"),
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "Cloudflare R2 / object storage is required for raw payload persistence. "
+            "Configure CF_R2_BUCKET, CF_R2_ENDPOINT, CF_R2_ACCESS_KEY, and "
+            "CF_R2_SECRET_KEY."
+        ) from exc
+    return S3CompatibleObjectStore.from_config(config)
+
+
 def _build_execution_config(
     *,
     paths: RuntimePaths,
@@ -1582,6 +1668,10 @@ def build_local_demo_app(
     env: Mapping[str, str] | None = None,
     execution_config: KrakenCLIConfig | None = None,
     execution_runner: CommandRunner | None = None,
+    runs_repository: IngestionRunsRepository | None = None,
+    raw_events_repository: RawEventsRepository | None = None,
+    event_repository: EventDetectionRepository | None = None,
+    object_store: RawObjectStore | None = None,
 ) -> TradingApplication:
     resolved_trading_mode = _normalize_trading_mode(trading_mode)
     runtime_env = _resolve_runtime_env(
@@ -1612,6 +1702,10 @@ def build_local_demo_app(
         runtime_mode=resolved_runtime_mode,
         trading_mode=resolved_trading_mode,
         identity_layer=resolved_identity_layer,
+        runs_repository=runs_repository,
+        raw_events_repository=raw_events_repository,
+        event_repository=event_repository,
+        object_store=object_store,
         **agent_profile,
     )
 
@@ -1662,10 +1756,24 @@ def build_runtime_preflight(
     postgres_configured = postgres_connection_factory is not None
     postgres_reachable = None
     postgres_error = None
-    if postgres_connection_factory is not None:
-        postgres_reachable, postgres_error = probe_postgres_connection(postgres_connection_factory)
-        if not postgres_reachable and postgres_error:
-            issues.append(f"Postgres is configured but not reachable: {postgres_error}")
+    if postgres_connection_factory is None:
+        issues.append(
+            "Postgres storage is required. Set POSTGRES_ENABLED=true and configure "
+            "DATABASE_URL or POSTGRES_* before starting the trading runtime."
+        )
+
+    object_store_configured = False
+    object_store_error = None
+    try:
+        ObjectStorageConfig.from_env(env=env_map, env_path=paths.base_dir / ".env")
+        object_store_configured = True
+    except ValueError as exc:
+        object_store_error = str(exc)
+        issues.append(
+            "Cloudflare R2 / object storage is required for raw payload persistence. "
+            "Configure CF_R2_BUCKET, CF_R2_ENDPOINT, CF_R2_ACCESS_KEY, and "
+            "CF_R2_SECRET_KEY."
+        )
 
     if execution_config.dry_run or not execution_config.live_enabled:
         issues.append(
@@ -1702,6 +1810,13 @@ def build_runtime_preflight(
         if invalid_keys:
             issues.append("Unable to derive wallet addresses from: " + ", ".join(invalid_keys))
 
+    if postgres_connection_factory is not None:
+        postgres_reachable, postgres_error = probe_postgres_connection(
+            postgres_connection_factory
+        )
+        if not postgres_reachable and postgres_error:
+            issues.append(f"Postgres is configured but not reachable: {postgres_error}")
+
     will_submit_real_orders = (
         execution_config.live_enabled
         and not execution_config.dry_run
@@ -1727,15 +1842,17 @@ def build_runtime_preflight(
             "sepolia_missing_required_values": sepolia_missing,
             "postgres_configured": postgres_configured,
             "postgres_reachable": postgres_reachable,
+            "object_store_configured": object_store_configured,
         },
         "execution_config": {
             "kraken_cli_executable": execution_config.executable,
             "kraken_dry_run": execution_config.dry_run,
             "kraken_live_enabled": execution_config.live_enabled,
             "kraken_validate_only": execution_config.validate_only,
-            "storage_backend": "postgres" if postgres_configured else "local",
-            "object_store_backend": "local_files",
+            "storage_backend": "postgres" if postgres_configured else "unconfigured",
+            "object_store_backend": "r2" if object_store_configured else "unconfigured",
             "postgres_error": postgres_error,
+            "object_store_error": object_store_error,
         },
         "issues": issues,
     }
