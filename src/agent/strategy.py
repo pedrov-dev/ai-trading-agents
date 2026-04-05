@@ -28,6 +28,7 @@ class StrategyConfig:
     thesis_cooldown_enabled: bool = True
     thesis_cooldown_hours: int = 6
     thesis_repeat_penalty: float = 0.12
+    thesis_similarity_threshold: float = 0.75
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,9 @@ class _ThesisCooldownState:
 
     last_seen_at: datetime
     last_raw_event_id: str
+    thesis_fingerprint: str | None = None
+    thesis_tokens: tuple[str, ...] = ()
+    event_key: str | None = None
     repeat_count: int = 0
 
 
@@ -80,7 +84,7 @@ class SimpleEventDrivenStrategy:
         self._config = config or StrategyConfig()
         self._risk_manager = RiskManager(risk_config or RiskConfig())
         self._exit_config = exit_config or ExitConfig()
-        self._thesis_cooldowns: dict[tuple[str, str, str], _ThesisCooldownState] = {}
+        self._thesis_cooldowns: dict[tuple[str, str], list[_ThesisCooldownState]] = {}
 
     def generate_trade_intents(
         self,
@@ -149,7 +153,7 @@ class SimpleEventDrivenStrategy:
         return intents
 
     def _apply_thesis_cooldown(self, *, signal: Signal) -> Signal:
-        """Decay repeated same-thesis signals so the strategy seeks fresh setups."""
+        """Decay repeated or highly similar theses so the strategy seeks fresh setups."""
         if (
             not self._config.thesis_cooldown_enabled
             or self._config.thesis_cooldown_hours <= 0
@@ -157,49 +161,67 @@ class SimpleEventDrivenStrategy:
         ):
             return signal
 
-        thesis_key = (
-            signal.symbol_id,
-            signal.event_group or signal.event_type,
-            signal.side,
-        )
+        history_key = (signal.symbol_id, signal.side)
         cooldown_window = timedelta(hours=self._config.thesis_cooldown_hours)
-        previous_state = self._thesis_cooldowns.get(thesis_key)
+        similarity_threshold = min(max(self._config.thesis_similarity_threshold, 0.0), 1.0)
+        recent_states = [
+            state
+            for state in self._thesis_cooldowns.get(history_key, [])
+            if signal.generated_at < state.last_seen_at + cooldown_window
+        ]
+
         repeat_count = 0
         adjusted_signal = signal
+        best_similarity = 0.0
+        best_state: _ThesisCooldownState | None = None
 
-        if previous_state is not None:
-            within_window = signal.generated_at < previous_state.last_seen_at + cooldown_window
-            same_raw_event = signal.raw_event_id == previous_state.last_raw_event_id
+        for state in recent_states:
+            similarity = _thesis_similarity(signal=signal, state=state)
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_state = state
 
-            if within_window and same_raw_event:
-                repeat_count = previous_state.repeat_count + 1
-                penalty = min(
-                    self._config.thesis_repeat_penalty * repeat_count,
-                    max(signal.score - 0.01, 0.0),
-                )
-                adjusted_score = round(max(signal.score - penalty, 0.0), 4)
-                adjusted_confidence = round(
-                    max(0.0, min(signal.confidence, adjusted_score)),
-                    4,
-                )
-                adjusted_signal = replace(
-                    signal,
-                    confidence=adjusted_confidence,
-                    score=adjusted_score,
-                    rationale=signal.rationale
-                    + (
-                        "Signal cooldown active for repeated thesis "
-                        f"{signal.event_type} on {signal.symbol_id}; "
-                        f"confidence reduced by {penalty:.2f} inside the "
-                        f"{self._config.thesis_cooldown_hours}h window.",
-                    ),
-                )
+        if best_state is not None and best_similarity >= similarity_threshold:
+            repeat_count = best_state.repeat_count + 1
+            exact_replay = signal.raw_event_id == best_state.last_raw_event_id
+            penalty_scale = 1.0 if exact_replay else 0.2
+            penalty = min(
+                self._config.thesis_repeat_penalty
+                * repeat_count
+                * best_similarity
+                * penalty_scale,
+                max(signal.score - 0.01, 0.0),
+            )
+            adjusted_score = round(max(signal.score - penalty, 0.0), 4)
+            adjusted_confidence = round(
+                max(0.0, min(signal.confidence, adjusted_score)),
+                4,
+            )
+            similarity_label = "repeated thesis" if exact_replay else "similar thesis"
+            adjusted_signal = replace(
+                signal,
+                confidence=adjusted_confidence,
+                score=adjusted_score,
+                rationale=signal.rationale
+                + (
+                    f"Thesis cooldown active for a {similarity_label} on "
+                    f"{signal.symbol_id}; similarity={best_similarity:.2f} "
+                    f"inside the {self._config.thesis_cooldown_hours}h "
+                    f"window reduced confidence by {penalty:.2f}.",
+                ),
+            )
 
-        self._thesis_cooldowns[thesis_key] = _ThesisCooldownState(
-            last_seen_at=signal.generated_at,
-            last_raw_event_id=signal.raw_event_id,
-            repeat_count=repeat_count,
+        recent_states.append(
+            _ThesisCooldownState(
+                last_seen_at=signal.generated_at,
+                last_raw_event_id=signal.raw_event_id,
+                thesis_fingerprint=signal.thesis_fingerprint,
+                thesis_tokens=signal.thesis_tokens,
+                event_key=signal.event_group or signal.event_type,
+                repeat_count=repeat_count,
+            )
         )
+        self._thesis_cooldowns[history_key] = recent_states[-12:]
         return adjusted_signal
 
     def evaluate_position_exits(
@@ -332,6 +354,33 @@ class SimpleEventDrivenStrategy:
             now=now,
             reduce_only=reduce_only,
         )
+
+
+def _thesis_similarity(*, signal: Signal, state: _ThesisCooldownState) -> float:
+    if signal.raw_event_id == state.last_raw_event_id:
+        return 1.0
+    if signal.thesis_fingerprint and signal.thesis_fingerprint == state.thesis_fingerprint:
+        return 1.0
+
+    signal_event_key = signal.event_group or signal.event_type
+    same_event_key = bool(
+        signal_event_key and state.event_key and signal_event_key == state.event_key
+    )
+    token_similarity = _jaccard_similarity(signal.thesis_tokens, state.thesis_tokens)
+
+    if same_event_key and token_similarity > 0.0:
+        return round(min(1.0, 0.6 + (0.4 * token_similarity)), 4)
+    if same_event_key:
+        return 0.0
+    return round(token_similarity * 0.35, 4)
+
+
+def _jaccard_similarity(left: tuple[str, ...], right: tuple[str, ...]) -> float:
+    left_set = set(left)
+    right_set = set(right)
+    if not left_set or not right_set:
+        return 0.0
+    return len(left_set & right_set) / len(left_set | right_set)
 
 
 def _build_horizon_trade_intents(

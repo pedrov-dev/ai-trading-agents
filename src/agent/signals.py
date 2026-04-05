@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -42,6 +43,73 @@ _SYMBOL_KEYWORDS: dict[str, tuple[str, ...]] = {
 
 _PREFERRED_SYMBOLS: tuple[str, ...] = ("btc_usd", "eth_usd", "sol_usd", "xrp_usd")
 
+_REASONING_STOPWORDS: set[str] = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "asset",
+    "assets",
+    "at",
+    "because",
+    "for",
+    "from",
+    "into",
+    "is",
+    "of",
+    "on",
+    "risk",
+    "the",
+    "to",
+    "with",
+}
+
+_REASONING_THEME_ALIASES: dict[str, str] = {
+    "macro": "macro",
+    "macroeconomic": "macro",
+    "liquidity": "macro",
+    "headwind": "macro",
+    "headwinds": "macro",
+    "tight": "macro",
+    "tightening": "macro",
+    "pressure": "macro",
+    "pressuring": "macro",
+    "pressured": "macro",
+    "rate": "macro",
+    "rates": "macro",
+    "yield": "macro",
+    "yields": "macro",
+    "usd": "macro",
+    "dollar": "macro",
+    "dxy": "macro",
+    "strength": "macro",
+    "weakness": "macro",
+    "fed": "macro",
+    "federal": "macro",
+    "inflation": "macro",
+    "cpi": "macro",
+    "ppi": "macro",
+    "hawkish": "macro",
+    "dovish": "macro",
+    "approval": "approval",
+    "approved": "approval",
+    "delay": "delay",
+    "delayed": "delay",
+    "listing": "listing",
+    "listed": "listing",
+    "regulation": "regulation",
+    "regulatory": "regulation",
+    "sec": "regulation",
+    "hack": "security",
+    "hacked": "security",
+    "breach": "security",
+    "exploit": "security",
+    "breakout": "technical",
+    "breakouts": "technical",
+    "whale": "flow",
+}
+
 
 @dataclass(frozen=True)
 class Signal:
@@ -58,6 +126,8 @@ class Signal:
     rationale: tuple[str, ...]
     event_group: str | None = None
     signal_id: str | None = None
+    thesis_fingerprint: str | None = None
+    thesis_tokens: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -146,6 +216,8 @@ def build_signal(*, event: DetectedEvent, quote: PriceQuote) -> Signal:
     )
 
     generated_at = event.detected_at or datetime.now(UTC)
+    event_group = event_performance_group(event.event_type)
+    thesis_tokens = _extract_thesis_tokens(event=event, symbol_id=quote.symbol_id)
     return Signal(
         signal_id=_build_signal_id(
             raw_event_id=event.raw_event_id,
@@ -162,7 +234,15 @@ def build_signal(*, event: DetectedEvent, quote: PriceQuote) -> Signal:
         current_price=quote.current,
         generated_at=generated_at,
         rationale=rationale,
-        event_group=event_performance_group(event.event_type),
+        event_group=event_group,
+        thesis_fingerprint=_build_thesis_fingerprint(
+            symbol_id=quote.symbol_id,
+            side=side,
+            event_type=event.event_type,
+            event_group=event_group,
+            thesis_tokens=thesis_tokens,
+        ),
+        thesis_tokens=thesis_tokens,
     )
 
 
@@ -219,6 +299,46 @@ def _price_momentum(quote: PriceQuote) -> float:
     if quote.open <= 0:
         return 0.0
     return (quote.current - quote.open) / quote.open
+
+
+def _extract_thesis_tokens(*, event: DetectedEvent, symbol_id: str) -> tuple[str, ...]:
+    event_text = f"{event.rule_name} {event.matched_text or ''}".lower()
+    raw_tokens = re.findall(r"[a-z0-9]+", event_text)
+    symbol_keywords = set(_SYMBOL_KEYWORDS.get(symbol_id, ()))
+    normalized_tokens: list[str] = []
+
+    for token in raw_tokens:
+        if token in symbol_keywords or token in {"bullish", "bearish", "up", "down"}:
+            continue
+        if len(token) <= 2 or token in _REASONING_STOPWORDS:
+            continue
+
+        normalized_token = _REASONING_THEME_ALIASES.get(token, token)
+        if normalized_token in _REASONING_STOPWORDS:
+            continue
+        normalized_tokens.append(normalized_token)
+
+    ordered_tokens = tuple(sorted(dict.fromkeys(normalized_tokens)))
+    if ordered_tokens:
+        return ordered_tokens
+
+    fallback = event_performance_group(event.event_type) or event.event_type.lower()
+    return (fallback,)
+
+
+def _build_thesis_fingerprint(
+    *,
+    symbol_id: str,
+    side: TradeSide,
+    event_type: str,
+    event_group: str | None,
+    thesis_tokens: tuple[str, ...],
+) -> str:
+    reasoning_signature = "|".join(thesis_tokens) if thesis_tokens else "generic"
+    digest = hashlib.sha256(
+        f"{symbol_id}|{side}|{event_type}|{event_group or ''}|{reasoning_signature}".encode()
+    ).hexdigest()[:12]
+    return f"thesis-{digest}"
 
 
 def _build_signal_id(

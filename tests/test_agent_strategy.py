@@ -320,6 +320,126 @@ def test_strategy_expires_cooldown_after_six_hours() -> None:
     assert expired_window_intents[0].confidence_score == first_intents[0].confidence_score
 
 
+def test_strategy_decays_similar_macro_thesis_across_different_headlines() -> None:
+    strategy = SimpleEventDrivenStrategy(
+        config=StrategyConfig(
+            min_signal_score=0.7,
+            thesis_cooldown_hours=6,
+            thesis_repeat_penalty=0.12,
+        )
+    )
+    portfolio = PortfolioSnapshot(total_equity=10_000.0, cash_usd=10_000.0)
+    prices = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=64_500.0,
+            open=66_000.0,
+            high=66_500.0,
+            low=64_000.0,
+            prev_close=65_800.0,
+            timestamp=1712100000,
+            asset_class="spot",
+        )
+    ]
+
+    first_intents = strategy.generate_trade_intents(
+        detected_events=[
+            DetectedEvent(
+                raw_event_id="evt-macro-1",
+                event_type="REGULATORY_NEWS",
+                rule_name="macro_headwinds",
+                confidence=0.83,
+                matched_text="BTC bearish because macro headwinds and tight liquidity",
+                detected_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC),
+            )
+        ],
+        price_quotes=prices,
+        portfolio=portfolio,
+    )
+    repeated_intents = strategy.generate_trade_intents(
+        detected_events=[
+            DetectedEvent(
+                raw_event_id="evt-macro-2",
+                event_type="REGULATORY_NEWS",
+                rule_name="rates_usd_pressure",
+                confidence=0.83,
+                matched_text=(
+                    "BTC bearish because rates and USD strength are "
+                    "pressuring risk assets"
+                ),
+                detected_at=datetime(2026, 4, 3, 13, 0, tzinfo=UTC),
+            )
+        ],
+        price_quotes=prices,
+        portfolio=portfolio,
+    )
+
+    assert len(first_intents) == 4
+    assert len(repeated_intents) == 4
+    assert first_intents[0].confidence_score is not None
+    assert repeated_intents[0].confidence_score is not None
+    assert repeated_intents[0].confidence_score < first_intents[0].confidence_score
+    assert any("similar thesis" in reason.lower() for reason in repeated_intents[0].rationale)
+
+
+def test_strategy_keeps_opposite_direction_thesis_separate() -> None:
+    strategy = SimpleEventDrivenStrategy(
+        config=StrategyConfig(
+            min_signal_score=0.7,
+            thesis_cooldown_hours=6,
+            thesis_repeat_penalty=0.12,
+        )
+    )
+    portfolio = PortfolioSnapshot(total_equity=10_000.0, cash_usd=10_000.0)
+    prices = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=68_000.0,
+            open=66_000.0,
+            high=68_500.0,
+            low=65_500.0,
+            prev_close=65_800.0,
+            timestamp=1712100000,
+            asset_class="spot",
+        )
+    ]
+
+    bullish_intents = strategy.generate_trade_intents(
+        detected_events=[
+            DetectedEvent(
+                raw_event_id="evt-bullish",
+                event_type="ETF_APPROVAL",
+                rule_name="etf_approval",
+                confidence=0.86,
+                matched_text="bitcoin etf approval boosts institutional demand",
+                detected_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC),
+            )
+        ],
+        price_quotes=prices,
+        portfolio=portfolio,
+    )
+    bearish_intents = strategy.generate_trade_intents(
+        detected_events=[
+            DetectedEvent(
+                raw_event_id="evt-bearish",
+                event_type="SECURITY_INCIDENT",
+                rule_name="exchange_hack",
+                confidence=0.9,
+                matched_text="bitcoin turns bearish after a major exchange security incident",
+                detected_at=datetime(2026, 4, 3, 13, 0, tzinfo=UTC),
+            )
+        ],
+        price_quotes=prices,
+        portfolio=portfolio,
+    )
+
+    assert len(bullish_intents) == 4
+    assert len(bearish_intents) == 4
+    assert all(intent.side == "buy" for intent in bullish_intents)
+    assert all(intent.side == "sell" for intent in bearish_intents)
+    assert not any("similar thesis" in reason.lower() for reason in bearish_intents[0].rationale)
+
+
 def test_strategy_generates_exit_intent_when_take_profit_is_hit() -> None:
     strategy = SimpleEventDrivenStrategy(
         exit_config=ExitConfig(
