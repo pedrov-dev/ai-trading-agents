@@ -9,6 +9,7 @@ from agent.portfolio import PortfolioSnapshot, Position
 from agent.risk import RiskCheckResult, RiskConfig, RiskManager
 from agent.signals import (
     NoTradeDecision,
+    RejectedTradeCandidate,
     Signal,
     TradeIntent,
     build_signal,
@@ -147,6 +148,30 @@ class SimpleEventDrivenStrategy:
         self._exit_config = exit_config or ExitConfig()
         self._thesis_cooldowns: dict[tuple[str, str], list[_ThesisCooldownState]] = {}
         self._last_no_trade_decisions: list[NoTradeDecision] = []
+        self._heuristic_revision = 1
+
+    @property
+    def config(self) -> StrategyConfig:
+        return self._config
+
+    @property
+    def heuristic_version(self) -> str:
+        return f"strategy-v{self._heuristic_revision}"
+
+    def set_heuristic_version(self, version: str | None) -> None:
+        if not version:
+            self._heuristic_revision = 1
+            return
+        try:
+            self._heuristic_revision = max(int(version.rsplit("v", 1)[-1]), 1)
+        except ValueError:
+            self._heuristic_revision = 1
+
+    def apply_refined_config(self, config: StrategyConfig) -> str:
+        if config != self._config:
+            self._config = config
+            self._heuristic_revision += 1
+        return self.heuristic_version
 
     def generate_trade_intents(
         self,
@@ -306,11 +331,13 @@ class SimpleEventDrivenStrategy:
         selected_signal_count = 0
         max_ranked_signals = self._max_ranked_signals_per_cycle()
 
-        for ranked_signal in sorted(
+        sorted_ranked_signals = sorted(
             ranked_signals.values(),
             key=lambda item: (item.composite_score, item.signal.score),
             reverse=True,
-        ):
+        )
+
+        for selection_rank, ranked_signal in enumerate(sorted_ranked_signals, start=1):
             signal = ranked_signal.signal
             if not self._can_allocate_symbol(
                 symbol_id=signal.symbol_id,
@@ -357,6 +384,11 @@ class SimpleEventDrivenStrategy:
                     "slot(s) this cycle.",
                 )
 
+            rejected_alternatives = tuple(
+                _candidate_snapshot(item)
+                for item in sorted_ranked_signals
+                if item.signal.symbol_id != signal.symbol_id
+            )[:3]
             symbol_intents = _build_horizon_trade_intents(
                 signal=signal,
                 allowed_notional=ranked_signal.risk_result.allowed_notional,
@@ -364,6 +396,10 @@ class SimpleEventDrivenStrategy:
                 exit_config=self._exit_config,
                 max_intents=available_intent_slots,
                 risk_reward_estimate=ranked_signal.risk_reward_estimate,
+                selection_rank=selection_rank,
+                selection_composite_score=ranked_signal.composite_score,
+                rejected_alternatives=rejected_alternatives,
+                heuristic_version=self.heuristic_version,
             )
             if not symbol_intents:
                 continue
@@ -826,6 +862,10 @@ class SimpleEventDrivenStrategy:
                     max_hold_minutes=position.max_hold_minutes,
                     exit_due_at=position.exit_due_at,
                     position_id=position.position_id,
+                    selection_rank=position.selection_rank,
+                    selection_composite_score=position.selection_composite_score,
+                    rejected_alternatives=position.rejected_alternatives,
+                    heuristic_version=position.heuristic_version,
                 )
             )
 
@@ -922,6 +962,19 @@ def _resolve_quote_volatility_filter(quote: PriceQuote) -> float | None:
     return round((atr / quote.current) / max(realized_volatility, 0.0001), 4)
 
 
+def _candidate_snapshot(ranked_signal: RankedSignal) -> RejectedTradeCandidate:
+    return RejectedTradeCandidate(
+        symbol_id=ranked_signal.signal.symbol_id,
+        side=ranked_signal.signal.side,
+        reference_price=ranked_signal.signal.current_price,
+        score=ranked_signal.signal.score,
+        confidence_score=ranked_signal.signal.confidence,
+        composite_score=ranked_signal.composite_score,
+        event_type=ranked_signal.signal.event_type,
+        event_group=ranked_signal.signal.event_group,
+    )
+
+
 def _build_horizon_trade_intents(
     *,
     signal: Signal,
@@ -930,6 +983,10 @@ def _build_horizon_trade_intents(
     exit_config: ExitConfig,
     max_intents: int | None = None,
     risk_reward_estimate: RiskRewardEstimate | None = None,
+    selection_rank: int | None = None,
+    selection_composite_score: float | None = None,
+    rejected_alternatives: tuple[RejectedTradeCandidate, ...] = (),
+    heuristic_version: str | None = None,
 ) -> list[TradeIntent]:
     if max_intents is not None and max_intents <= 0:
         return []
@@ -964,6 +1021,10 @@ def _build_horizon_trade_intents(
                     if risk_reward_estimate is not None
                     else None
                 ),
+                selection_rank=selection_rank,
+                selection_composite_score=selection_composite_score,
+                rejected_alternatives=rejected_alternatives,
+                heuristic_version=heuristic_version,
             )
         ]
 
@@ -1011,6 +1072,10 @@ def _build_horizon_trade_intents(
                     if risk_reward_estimate is not None
                     else None
                 ),
+                selection_rank=selection_rank,
+                selection_composite_score=selection_composite_score,
+                rejected_alternatives=rejected_alternatives,
+                heuristic_version=heuristic_version,
             )
         )
 

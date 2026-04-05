@@ -6,7 +6,7 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 
 from detection.event_detection import DetectedEvent
 from detection.event_types import event_performance_group
@@ -178,6 +178,48 @@ _REASONING_THEME_ALIASES: dict[str, str] = {
 
 
 @dataclass(frozen=True)
+class RejectedTradeCandidate:
+    """Counterfactual candidate that lost the rank/selection contest this cycle."""
+
+    symbol_id: str
+    side: TradeSide
+    reference_price: float
+    score: float
+    confidence_score: float
+    composite_score: float
+    event_type: str | None = None
+    event_group: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.reference_price <= 0:
+            raise ValueError("RejectedTradeCandidate reference_price must be positive.")
+        object.__setattr__(self, "reference_price", round(self.reference_price, 8))
+        object.__setattr__(self, "score", round(min(max(self.score, 0.0), 1.0), 4))
+        object.__setattr__(
+            self,
+            "confidence_score",
+            round(min(max(self.confidence_score, 0.0), 1.0), 4),
+        )
+        object.__setattr__(
+            self,
+            "composite_score",
+            round(min(max(self.composite_score, 0.0), 1.0), 4),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol_id": self.symbol_id,
+            "side": self.side,
+            "reference_price": self.reference_price,
+            "score": self.score,
+            "confidence_score": self.confidence_score,
+            "composite_score": self.composite_score,
+            "event_type": self.event_type,
+            "event_group": self.event_group,
+        }
+
+
+@dataclass(frozen=True)
 class Signal:
     """Scored trading opportunity derived from a detected event and price quote."""
 
@@ -230,6 +272,10 @@ class TradeIntent:
     max_hold_minutes: int | None = None
     exit_due_at: datetime | None = None
     position_id: str | None = None
+    selection_rank: int | None = None
+    selection_composite_score: float | None = None
+    rejected_alternatives: tuple[RejectedTradeCandidate, ...] = ()
+    heuristic_version: str | None = None
 
     def __post_init__(self) -> None:
         resolved_confidence = self.score if self.confidence_score is None else self.confidence_score
@@ -245,6 +291,8 @@ class TradeIntent:
             raise ValueError("Trade intent stop_distance_fraction must be non-negative.")
         if self.risk_reward_ratio is not None and self.risk_reward_ratio < 0:
             raise ValueError("Trade intent risk_reward_ratio must be non-negative.")
+        if self.selection_rank is not None and self.selection_rank <= 0:
+            raise ValueError("Trade intent selection_rank must be positive when set.")
 
         object.__setattr__(self, "confidence_score", round(resolved_confidence, 4))
         object.__setattr__(self, "expected_move", resolved_expected_move)
@@ -262,6 +310,17 @@ class TradeIntent:
             )
         if self.risk_reward_ratio is not None:
             object.__setattr__(self, "risk_reward_ratio", round(self.risk_reward_ratio, 4))
+        if self.selection_composite_score is not None:
+            object.__setattr__(
+                self,
+                "selection_composite_score",
+                round(min(max(self.selection_composite_score, 0.0), 1.0), 4),
+            )
+        object.__setattr__(
+            self,
+            "rejected_alternatives",
+            tuple(self.rejected_alternatives),
+        )
 
 
 @dataclass(frozen=True)
@@ -483,6 +542,10 @@ def build_trade_intent(
     expected_move_fraction: float | None = None,
     stop_distance_fraction: float | None = None,
     risk_reward_ratio: float | None = None,
+    selection_rank: int | None = None,
+    selection_composite_score: float | None = None,
+    rejected_alternatives: tuple[RejectedTradeCandidate, ...] = (),
+    heuristic_version: str | None = None,
 ) -> TradeIntent:
     quantity = 0.0
     if signal.current_price > 0:
@@ -524,6 +587,10 @@ def build_trade_intent(
         max_hold_minutes=max_hold_minutes,
         exit_due_at=horizon_due_at,
         position_id=position_id,
+        selection_rank=selection_rank,
+        selection_composite_score=selection_composite_score,
+        rejected_alternatives=rejected_alternatives,
+        heuristic_version=heuristic_version,
     )
 
 

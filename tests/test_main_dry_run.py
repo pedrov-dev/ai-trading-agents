@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -167,6 +167,75 @@ def test_kraken_paper_app_closes_open_position_on_take_profit(tmp_path: Path) ->
     assert result.portfolio.realized_pnl_today == 15.0
     assert "--side" in calls[0]
     assert "sell" in calls[0]
+
+
+def test_trade_cycle_records_post_trade_review_and_heuristic_state(tmp_path: Path) -> None:
+    def fake_runner(command: tuple[str, ...], timeout_seconds: int) -> CommandRunResult:
+        assert timeout_seconds == 15
+        return CommandRunResult(
+            exit_code=0,
+            stdout='{"status": "validated", "validated": true}',
+            stderr="",
+        )
+
+    app = build_local_demo_app(
+        base_dir=tmp_path,
+        trading_mode="paper",
+        execution_runner=fake_runner,
+        env={
+            "KRAKEN_API_KEY": "demo-key",
+            "KRAKEN_API_SECRET": "demo-secret",
+        },
+        execution_config=KrakenCLIConfig(
+            executable="kraken-cli",
+            dry_run=False,
+            live_enabled=True,
+            validate_only=True,
+            audit_log_path=tmp_path / "artifacts" / "orders_audit.jsonl",
+        ),
+        **_storage_overrides(tmp_path),
+    )
+    opened_at = datetime(2026, 4, 3, 12, 0, tzinfo=UTC)
+    app._portfolio_provider.record_fill(
+        symbol_id="btc_usd",
+        side="buy",
+        quantity=0.01,
+        price=50_000.0,
+        filled_at=opened_at,
+        source_signal_id="signal-early",
+        raw_event_id="evt-early",
+        event_type="ETF_APPROVAL",
+        exit_horizon_label="30m",
+        max_hold_minutes=120,
+        exit_due_at=opened_at + timedelta(minutes=120),
+        confidence_score=0.91,
+        expected_move="up",
+    )
+    app._latest_quotes = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=49_000.0,
+            open=50_100.0,
+            high=50_100.0,
+            low=48_900.0,
+            prev_close=50_000.0,
+            timestamp=1712100000,
+            asset_class="spot",
+        )
+    ]
+
+    result = app.execute_trade_cycle(classification_count=0)
+
+    latest_entry = result.journal_summary.recent_entries[-1]
+    heuristic_state = json.loads(
+        (tmp_path / "artifacts" / "heuristic_state.json").read_text(encoding="utf-8")
+    )
+
+    assert latest_entry.event_type == "full_exit"
+    assert latest_entry.timing_label == "too_late"
+    assert heuristic_state["heuristic_version"].startswith("strategy-v")
+    assert heuristic_state["last_post_trade_reviews"]
+    assert heuristic_state["last_applied_adjustments"]
 
 
 def test_ingest_secondary_prices_merges_hourly_quotes_into_runtime_state(tmp_path: Path) -> None:

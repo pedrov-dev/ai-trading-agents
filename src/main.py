@@ -17,7 +17,7 @@ from typing import Any, cast
 from agent.portfolio import LocalPortfolioStateProvider, PortfolioSnapshot
 from agent.risk import RiskConfig
 from agent.signals import NoTradeDecision, TradeIntent, select_quote_for_event
-from agent.strategy import SimpleEventDrivenStrategy
+from agent.strategy import SimpleEventDrivenStrategy, StrategyConfig
 from detection.event_detection import DetectedEvent, RuleBasedEventDetector
 from detection.event_detection_postgres import (
     EventDetectionRepository,
@@ -58,6 +58,14 @@ from ingestion.rss_ingestion import RSSIngestionService
 from monitoring.audit_log import AuditSummary, build_audit_summary_from_file
 from monitoring.calibration import CalibrationSummary, build_calibration_summary
 from monitoring.drawdown import DrawdownSnapshot, EquityPoint, build_drawdown_snapshot
+from monitoring.learning import (
+    HeuristicLearningState,
+    PostTradeReview,
+    evaluate_post_trade_review,
+    load_learning_state,
+    persist_learning_state,
+    refine_strategy_config,
+)
 from monitoring.pnl import PnLSnapshot, build_pnl_snapshot
 from monitoring.trade_journal import (
     LocalTradeJournal,
@@ -106,6 +114,8 @@ class RuntimePaths:
     checkpoints_log_path: Path
     activity_log_path: Path
     summary_path: Path
+    heuristic_state_path: Path
+    heuristic_refinements_path: Path
 
     @classmethod
     def from_base_dir(cls, base_dir: str | Path) -> RuntimePaths:
@@ -121,6 +131,8 @@ class RuntimePaths:
             checkpoints_log_path=artifacts_dir / "validation_checkpoints.jsonl",
             activity_log_path=artifacts_dir / "activity_log.jsonl",
             summary_path=artifacts_dir / "run_summary.json",
+            heuristic_state_path=artifacts_dir / "heuristic_state.json",
+            heuristic_refinements_path=artifacts_dir / "heuristic_refinements.jsonl",
         )
 
 
@@ -241,6 +253,9 @@ class RuntimeCycleResult:
                     "event_group": intent.event_group,
                     "exit_horizon_label": intent.exit_horizon_label,
                     "position_id": intent.position_id,
+                    "selection_rank": intent.selection_rank,
+                    "selection_composite_score": intent.selection_composite_score,
+                    "heuristic_version": intent.heuristic_version,
                     "rationale": list(intent.rationale),
                 }
                 for intent in self.trade_intents
@@ -342,6 +357,9 @@ class RuntimeCycleResult:
                     "event_group": intent.event_group,
                     "exit_horizon_label": intent.exit_horizon_label,
                     "position_id": intent.position_id,
+                    "selection_rank": intent.selection_rank,
+                    "selection_composite_score": intent.selection_composite_score,
+                    "heuristic_version": intent.heuristic_version,
                 }
                 for intent in self.trade_intents[-10:]
             ],
@@ -843,7 +861,19 @@ class TradingApplication:
             max_concurrent_positions=3,
             max_positions_per_asset=1,
         )
-        self._strategy = SimpleEventDrivenStrategy(risk_config=self._risk_config)
+        saved_learning_state = load_learning_state(paths.heuristic_state_path)
+        self._strategy = SimpleEventDrivenStrategy(
+            config=(saved_learning_state.current_config if saved_learning_state else None),
+            risk_config=self._risk_config,
+        )
+        if saved_learning_state is not None:
+            self._strategy.set_heuristic_version(saved_learning_state.heuristic_version)
+        self._learning_state = saved_learning_state or HeuristicLearningState(
+            heuristic_version=self._strategy.heuristic_version,
+            current_config=self._strategy.config,
+        )
+        self._last_post_trade_reviews: list[PostTradeReview] = []
+        self._heuristic_refinement_store = JsonlFileStore(paths.heuristic_refinements_path)
         resolved_execution_config = execution_config or KrakenCLIConfig(
             dry_run=False,
             live_enabled=True,
@@ -914,6 +944,7 @@ class TradingApplication:
         self._reputation_engine = ReputationEngine()
         self._reputation = self._reputation_engine.initialize(self._identity.agent_id)
         self._artifact_ledger = LocalArtifactLedger(paths)
+        persist_learning_state(self.paths.heuristic_state_path, self._learning_state)
         snapshot = self._portfolio_provider.get_portfolio_snapshot()
         self._equity_history: list[EquityPoint] = [
             EquityPoint(recorded_at=snapshot.as_of, equity=snapshot.total_equity)
@@ -1623,6 +1654,7 @@ class TradingApplication:
         prices_result: IngestionRunResult | None = None,
         classification_count: int = 0,
     ) -> RuntimeCycleResult:
+        self._last_post_trade_reviews = []
         current_portfolio = self._portfolio_provider.get_portfolio_snapshot()
         detected_events = self._new_detected_events()
         promoted_symbols = self.refresh_dynamic_tier_promotions(
@@ -1777,6 +1809,9 @@ class TradingApplication:
         audit_summary = build_audit_summary_from_file(self.paths.audit_log_path)
         journal_summary = self._trade_journal.build_summary()
         calibration_summary = build_calibration_summary(self._trade_journal.load_entries())
+        learning_state = self._apply_post_trade_learning(
+            calibration_summary=calibration_summary,
+        )
         self._artifact_ledger.record_action(
             action="performance_snapshot_updated",
             status="recorded",
@@ -1786,6 +1821,7 @@ class TradingApplication:
                 "drawdown_snapshot",
                 "journal_summary",
                 "calibration_summary",
+                "heuristic_state",
             ),
             details={
                 "total_equity": round(portfolio.total_equity, 2),
@@ -1795,6 +1831,10 @@ class TradingApplication:
                 "signal_outcome_count": _build_signal_discovery_summary(
                     artifacts
                 )["total_outcomes"],
+                "post_trade_review_count": len(self._last_post_trade_reviews),
+                "heuristic_adjustment_count": len(
+                    learning_state.last_applied_adjustments
+                ),
             },
             occurred_at=portfolio.as_of,
             summary_updates={
@@ -1810,6 +1850,10 @@ class TradingApplication:
                 "audit_summary": audit_summary.to_dict(),
                 "journal_summary": journal_summary.to_dict(),
                 "calibration_summary": calibration_summary.to_dict(),
+                "post_trade_reviews": [
+                    review.to_dict() for review in self._last_post_trade_reviews[-10:]
+                ],
+                "heuristic_state": learning_state.to_dict(),
                 "reputation": self._reputation.to_dict(),
                 "signal_discovery": _build_signal_discovery_summary(artifacts),
             },
@@ -1853,6 +1897,63 @@ class TradingApplication:
             summary=result.to_summary_dict(),
         )
         return result
+
+    def _apply_post_trade_learning(
+        self,
+        *,
+        calibration_summary: CalibrationSummary,
+    ) -> HeuristicLearningState:
+        current_config = getattr(self._strategy, "config", None)
+        if not isinstance(current_config, StrategyConfig):
+            current_config = self._learning_state.current_config
+
+        updated_config, adjustments = refine_strategy_config(
+            current_config=current_config,
+            calibration_summary=calibration_summary,
+            timing_labels=tuple(
+                review.timing_label for review in self._last_post_trade_reviews
+            ),
+            asset_selection_labels=tuple(
+                review.asset_selection_label for review in self._last_post_trade_reviews
+            ),
+        )
+        heuristic_version = str(
+            getattr(self._strategy, "heuristic_version", self._learning_state.heuristic_version)
+        )
+        apply_refined_config = getattr(self._strategy, "apply_refined_config", None)
+        if adjustments and callable(apply_refined_config):
+            heuristic_version = str(apply_refined_config(updated_config))
+            effective_config = getattr(self._strategy, "config", updated_config)
+        else:
+            effective_config = updated_config
+
+        if not isinstance(effective_config, StrategyConfig):
+            effective_config = updated_config
+
+        learning_state = HeuristicLearningState(
+            heuristic_version=heuristic_version,
+            current_config=effective_config,
+            last_post_trade_reviews=tuple(self._last_post_trade_reviews[-10:]),
+            last_applied_adjustments=adjustments,
+        )
+        persist_learning_state(self.paths.heuristic_state_path, learning_state)
+        self._learning_state = learning_state
+
+        if self._last_post_trade_reviews or adjustments:
+            self._heuristic_refinement_store.append(
+                {
+                    "recorded_at": learning_state.updated_at.isoformat(),
+                    "heuristic_version": learning_state.heuristic_version,
+                    "post_trade_reviews": [
+                        review.to_dict() for review in learning_state.last_post_trade_reviews
+                    ],
+                    "applied_adjustments": [
+                        adjustment.to_dict()
+                        for adjustment in learning_state.last_applied_adjustments
+                    ],
+                }
+            )
+        return learning_state
 
     def _record_no_trade_decisions(
         self,
@@ -1955,6 +2056,12 @@ class TradingApplication:
                     exit_due_at=intent.exit_due_at,
                     confidence_score=intent.confidence_score,
                     expected_move=intent.expected_move,
+                    selection_rank=intent.selection_rank,
+                    selection_composite_score=intent.selection_composite_score,
+                    rejected_alternatives=intent.rejected_alternatives,
+                    heuristic_version=(
+                        intent.heuristic_version or self._strategy.heuristic_version
+                    ),
                 )
                 working_portfolio = self._portfolio_provider.get_portfolio_snapshot()
                 journal_entry = TradeJournalEntry.from_execution_result(
@@ -1962,7 +2069,37 @@ class TradingApplication:
                     before_portfolio=portfolio_before_fill,
                     after_portfolio=working_portfolio,
                     notes=intent.rationale,
+                    heuristic_version=(
+                        intent.heuristic_version
+                        or (closed_position.heuristic_version if closed_position else None)
+                        or self._strategy.heuristic_version
+                    ),
                 )
+                if (
+                    closed_position is not None
+                    and journal_entry.event_type in {"partial_exit", "full_exit", "reverse"}
+                ):
+                    review = evaluate_post_trade_review(
+                        journal_entry=journal_entry,
+                        opened_at=closed_position.opened_at,
+                        latest_quotes=self._latest_quotes,
+                        rejected_alternatives=(
+                            closed_position.rejected_alternatives
+                            or intent.rejected_alternatives
+                        ),
+                    )
+                    self._last_post_trade_reviews.append(review)
+                    journal_entry = replace(
+                        journal_entry,
+                        timing_label=review.timing_label,
+                        asset_selection_label=review.asset_selection_label,
+                        best_alternative_symbol=review.best_alternative_symbol,
+                        best_alternative_return_fraction=(
+                            review.best_alternative_return_fraction
+                        ),
+                        learning_reason_codes=review.reason_codes,
+                        notes=journal_entry.notes + review.notes,
+                    )
                 self._trade_journal.record_entry(journal_entry)
                 if (
                     closed_position is not None
@@ -2484,7 +2621,11 @@ def build_runtime_preflight(
     if will_submit_real_orders and not live_submit_enabled:
         issues.append("Kraken live trading requires `KRAKEN_CLI_ALLOW_LIVE_SUBMIT=true`.")
 
-    postgres_connection_factory = None if local_storage_mode else postgres_connection_factory_from_env(env_map)
+    postgres_connection_factory = (
+        None
+        if local_storage_mode
+        else postgres_connection_factory_from_env(env_map)
+    )
     postgres_configured = postgres_connection_factory is not None
     postgres_reachable = None
     postgres_error = None
@@ -2510,7 +2651,11 @@ def build_runtime_preflight(
                 "CF_R2_SECRET_KEY."
             )
 
-    if not execution_config.dry_run and execution_config.live_enabled and not kraken_credentials_present:
+    if (
+        not execution_config.dry_run
+        and execution_config.live_enabled
+        and not kraken_credentials_present
+    ):
         issues.append(
             "Kraken paper/live trading requires `KRAKEN_API_KEY` and `KRAKEN_API_SECRET`."
         )
@@ -2567,8 +2712,20 @@ def build_runtime_preflight(
             "kraken_dry_run": execution_config.dry_run,
             "kraken_live_enabled": execution_config.live_enabled,
             "kraken_validate_only": execution_config.validate_only,
-            "storage_backend": "local" if local_storage_mode else "postgres" if postgres_configured else "unconfigured",
-            "object_store_backend": "local" if local_storage_mode else "r2" if object_store_configured else "unconfigured",
+            "storage_backend": (
+                "local"
+                if local_storage_mode
+                else "postgres"
+                if postgres_configured
+                else "unconfigured"
+            ),
+            "object_store_backend": (
+                "local"
+                if local_storage_mode
+                else "r2"
+                if object_store_configured
+                else "unconfigured"
+            ),
             "postgres_error": postgres_error,
             "object_store_error": object_store_error,
         },

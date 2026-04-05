@@ -102,6 +102,12 @@ class ValidationArtifact:
             "max_hold_minutes": intent.max_hold_minutes,
             "exit_due_at": intent.exit_due_at.isoformat() if intent.exit_due_at else None,
             "position_id": intent.position_id,
+            "selection_rank": intent.selection_rank,
+            "selection_composite_score": intent.selection_composite_score,
+            "heuristic_version": intent.heuristic_version,
+            "rejected_alternatives": [
+                candidate.to_dict() for candidate in intent.rejected_alternatives
+            ],
         }
         evidence = (
             ArtifactEvidence(name="score", value=intent.score, unit="normalized"),

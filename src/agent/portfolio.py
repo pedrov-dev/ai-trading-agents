@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 
-from agent.signals import MoveDirection
+from agent.signals import MoveDirection, RejectedTradeCandidate
 
 PositionSide = Literal["long", "short"]
 
@@ -29,6 +29,10 @@ class Position:
     exit_horizon_label: str | None = None
     max_hold_minutes: int | None = None
     exit_due_at: datetime | None = None
+    selection_rank: int | None = None
+    selection_composite_score: float | None = None
+    rejected_alternatives: tuple[RejectedTradeCandidate, ...] = ()
+    heuristic_version: str | None = None
 
     @property
     def notional_usd(self) -> float:
@@ -128,6 +132,10 @@ class LocalPortfolioStateProvider:
         exit_due_at: datetime | None = None,
         confidence_score: float | None = None,
         expected_move: MoveDirection | None = None,
+        selection_rank: int | None = None,
+        selection_composite_score: float | None = None,
+        rejected_alternatives: tuple[RejectedTradeCandidate, ...] = (),
+        heuristic_version: str | None = None,
     ) -> PortfolioSnapshot:
         if quantity <= 0 or price <= 0:
             return self._snapshot
@@ -173,6 +181,10 @@ class LocalPortfolioStateProvider:
                 exit_due_at=exit_due_at,
                 confidence_score=confidence_score,
                 expected_move=resolved_expected_move,
+                selection_rank=selection_rank,
+                selection_composite_score=selection_composite_score,
+                rejected_alternatives=rejected_alternatives,
+                heuristic_version=heuristic_version,
             )
         else:
             existing_signed_quantity = _signed_quantity(existing)
@@ -204,6 +216,10 @@ class LocalPortfolioStateProvider:
                         added_quantity=abs(fill_signed_quantity),
                     ),
                     expected_move=existing.expected_move or resolved_expected_move,
+                    selection_rank=existing.selection_rank,
+                    selection_composite_score=existing.selection_composite_score,
+                    rejected_alternatives=existing.rejected_alternatives,
+                    heuristic_version=existing.heuristic_version,
                 )
             else:
                 closed_quantity = min(
@@ -236,6 +252,10 @@ class LocalPortfolioStateProvider:
                             exit_due_at=existing.exit_due_at,
                             confidence_score=existing.confidence_score,
                             expected_move=existing.expected_move,
+                            selection_rank=existing.selection_rank,
+                            selection_composite_score=existing.selection_composite_score,
+                            rejected_alternatives=existing.rejected_alternatives,
+                            heuristic_version=existing.heuristic_version,
                         )
                     else:
                         updated_position = _build_position(
@@ -253,6 +273,10 @@ class LocalPortfolioStateProvider:
                             exit_due_at=exit_due_at,
                             confidence_score=confidence_score,
                             expected_move=resolved_expected_move,
+                            selection_rank=selection_rank,
+                            selection_composite_score=selection_composite_score,
+                            rejected_alternatives=rejected_alternatives,
+                            heuristic_version=heuristic_version,
                         )
 
         updated_positions = remaining_positions + ((updated_position,) if updated_position else ())
@@ -319,6 +343,10 @@ def _build_position(
     exit_due_at: datetime | None = None,
     confidence_score: float | None = None,
     expected_move: MoveDirection | None = None,
+    selection_rank: int | None = None,
+    selection_composite_score: float | None = None,
+    rejected_alternatives: tuple[RejectedTradeCandidate, ...] = (),
+    heuristic_version: str | None = None,
 ) -> Position:
     resolved_exit_due_at = exit_due_at
     if resolved_exit_due_at is None and max_hold_minutes is not None and max_hold_minutes > 0:
@@ -342,6 +370,10 @@ def _build_position(
         exit_due_at=resolved_exit_due_at,
         confidence_score=confidence_score,
         expected_move=expected_move,
+        selection_rank=selection_rank,
+        selection_composite_score=selection_composite_score,
+        rejected_alternatives=tuple(rejected_alternatives),
+        heuristic_version=heuristic_version,
     )
 
 

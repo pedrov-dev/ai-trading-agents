@@ -8,14 +8,14 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from agent.portfolio import (
     LocalPortfolioStateProvider,
     PortfolioSnapshot,
     Position,
 )
-from agent.signals import MoveDirection
+from agent.signals import MoveDirection, RejectedTradeCandidate
 from detection.event_types import event_performance_group
 from execution.orders import ExecutionResult
 from storage.local_runtime import JsonlFileStore
@@ -53,6 +53,15 @@ class TradeJournalEntry:
     intent_id: str | None = None
     client_order_id: str | None = None
     realized_return_fraction: float | None = None
+    selection_rank: int | None = None
+    selection_composite_score: float | None = None
+    rejected_alternatives: tuple[RejectedTradeCandidate, ...] = ()
+    timing_label: str | None = None
+    asset_selection_label: str | None = None
+    best_alternative_symbol: str | None = None
+    best_alternative_return_fraction: float | None = None
+    learning_reason_codes: tuple[str, ...] = ()
+    heuristic_version: str | None = None
     notes: tuple[str, ...] = ()
 
     @classmethod
@@ -63,6 +72,12 @@ class TradeJournalEntry:
         before_portfolio: PortfolioSnapshot,
         after_portfolio: PortfolioSnapshot,
         notes: tuple[str, ...] = (),
+        timing_label: str | None = None,
+        asset_selection_label: str | None = None,
+        best_alternative_symbol: str | None = None,
+        best_alternative_return_fraction: float | None = None,
+        learning_reason_codes: tuple[str, ...] = (),
+        heuristic_version: str | None = None,
     ) -> TradeJournalEntry:
         """Build a journal row from one successful execution result."""
         fill = execution_result.fill
@@ -153,6 +168,41 @@ class TradeJournalEntry:
                     after_position=after_position,
                 ),
             ),
+            selection_rank=(
+                before_position.selection_rank
+                if before_position is not None
+                else after_position.selection_rank
+                if after_position is not None
+                else None
+            ),
+            selection_composite_score=(
+                before_position.selection_composite_score
+                if before_position is not None
+                else after_position.selection_composite_score
+                if after_position is not None
+                else None
+            ),
+            rejected_alternatives=(
+                before_position.rejected_alternatives
+                if before_position is not None
+                else after_position.rejected_alternatives
+                if after_position is not None
+                else ()
+            ),
+            timing_label=str(timing_label) if timing_label is not None else None,
+            asset_selection_label=(
+                str(asset_selection_label) if asset_selection_label is not None else None
+            ),
+            best_alternative_symbol=(
+                str(best_alternative_symbol) if best_alternative_symbol is not None else None
+            ),
+            best_alternative_return_fraction=(
+                round(float(best_alternative_return_fraction), 6)
+                if best_alternative_return_fraction is not None
+                else None
+            ),
+            learning_reason_codes=tuple(str(item) for item in learning_reason_codes),
+            heuristic_version=str(heuristic_version) if heuristic_version is not None else None,
             notes=tuple(str(item) for item in notes),
         )
 
@@ -172,6 +222,15 @@ class TradeJournalEntry:
         intent_id = payload.get("intent_id")
         client_order_id = payload.get("client_order_id")
         realized_return_fraction = payload.get("realized_return_fraction")
+        timing_label = payload.get("timing_label")
+        asset_selection_label = payload.get("asset_selection_label")
+        best_alternative_symbol = payload.get("best_alternative_symbol")
+        best_alternative_return_fraction = payload.get("best_alternative_return_fraction")
+        learning_reason_codes = payload.get("learning_reason_codes")
+        heuristic_version = payload.get("heuristic_version")
+        selection_rank = payload.get("selection_rank")
+        selection_composite_score = payload.get("selection_composite_score")
+        raw_rejected_alternatives = payload.get("rejected_alternatives", ())
         resolved_source_event_type = (
             str(source_event_type) if source_event_type is not None else None
         )
@@ -231,6 +290,55 @@ class TradeJournalEntry:
                 if realized_return_fraction is not None
                 else None
             ),
+            selection_rank=int(selection_rank) if selection_rank is not None else None,
+            selection_composite_score=(
+                float(selection_composite_score)
+                if selection_composite_score is not None
+                else None
+            ),
+            rejected_alternatives=tuple(
+                RejectedTradeCandidate(
+                    symbol_id=str(item.get("symbol_id", "unknown_symbol")),
+                    side=cast(
+                        Literal["buy", "sell"],
+                        "sell" if str(item.get("side", "buy")).lower() == "sell" else "buy",
+                    ),
+                    reference_price=float(item.get("reference_price", 0.0)),
+                    score=float(item.get("score", 0.0)),
+                    confidence_score=float(item.get("confidence_score", 0.0)),
+                    composite_score=float(item.get("composite_score", 0.0)),
+                    event_type=(
+                        str(item.get("event_type"))
+                        if item.get("event_type") is not None
+                        else None
+                    ),
+                    event_group=(
+                        str(item.get("event_group"))
+                        if item.get("event_group") is not None
+                        else None
+                    ),
+                )
+                for item in raw_rejected_alternatives
+                if isinstance(item, dict) and float(item.get("reference_price", 0.0)) > 0
+            ),
+            timing_label=str(timing_label) if timing_label is not None else None,
+            asset_selection_label=(
+                str(asset_selection_label) if asset_selection_label is not None else None
+            ),
+            best_alternative_symbol=(
+                str(best_alternative_symbol) if best_alternative_symbol is not None else None
+            ),
+            best_alternative_return_fraction=(
+                float(best_alternative_return_fraction)
+                if best_alternative_return_fraction is not None
+                else None
+            ),
+            learning_reason_codes=(
+                tuple(str(item) for item in learning_reason_codes)
+                if learning_reason_codes is not None
+                else ()
+            ),
+            heuristic_version=str(heuristic_version) if heuristic_version is not None else None,
             notes=tuple(str(item) for item in payload.get("notes", ())),
         )
 
@@ -263,6 +371,17 @@ class TradeJournalEntry:
             "intent_id": self.intent_id,
             "client_order_id": self.client_order_id,
             "realized_return_fraction": self.realized_return_fraction,
+            "selection_rank": self.selection_rank,
+            "selection_composite_score": self.selection_composite_score,
+            "rejected_alternatives": [
+                item.to_dict() for item in self.rejected_alternatives
+            ],
+            "timing_label": self.timing_label,
+            "asset_selection_label": self.asset_selection_label,
+            "best_alternative_symbol": self.best_alternative_symbol,
+            "best_alternative_return_fraction": self.best_alternative_return_fraction,
+            "learning_reason_codes": list(self.learning_reason_codes),
+            "heuristic_version": self.heuristic_version,
             "notes": list(self.notes),
         }
 
@@ -372,6 +491,10 @@ class LocalTradeJournal:
                 exit_due_at=entry.exit_due_at,
                 confidence_score=entry.confidence_score,
                 expected_move=entry.expected_move,
+                selection_rank=entry.selection_rank,
+                selection_composite_score=entry.selection_composite_score,
+                rejected_alternatives=entry.rejected_alternatives,
+                heuristic_version=entry.heuristic_version,
             )
         return snapshot
 
