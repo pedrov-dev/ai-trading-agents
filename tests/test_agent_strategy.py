@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from agent.portfolio import PortfolioSnapshot, Position
 from agent.risk import RiskConfig
@@ -651,6 +651,59 @@ def test_strategy_scales_position_size_by_confirmation_strength() -> None:
     )
     assert all(intent.side == "sell" for intent in by_symbol["btc_usd"])
     assert all(intent.side == "buy" for intent in by_symbol["sol_usd"])
+
+
+def test_strategy_blocks_stale_signal_after_time_decay() -> None:
+    strategy = SimpleEventDrivenStrategy(
+        config=StrategyConfig(
+            min_signal_score=0.7,
+            min_confidence_score=0.7,
+            thesis_cooldown_enabled=False,
+            signal_decay_half_life_minutes=60,
+        ),
+        risk_config=RiskConfig(max_position_fraction=0.05),
+    )
+    portfolio = PortfolioSnapshot(total_equity=10_000.0, cash_usd=10_000.0)
+    event = DetectedEvent(
+        raw_event_id="evt-stale-strategy",
+        event_type="ETF_APPROVAL",
+        rule_name="etf_approval",
+        confidence=0.88,
+        matched_text="bitcoin etf approval remains supportive",
+        detected_at=datetime(2026, 4, 4, 12, 0, tzinfo=UTC),
+    )
+    prices = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=68_000.0,
+            open=66_000.0,
+            high=68_500.0,
+            low=65_500.0,
+            prev_close=65_800.0,
+            timestamp=1712232000,
+            asset_class="spot",
+        )
+    ]
+
+    fresh_intents = strategy.generate_trade_intents(
+        detected_events=[event],
+        price_quotes=prices,
+        portfolio=portfolio,
+        now=event.detected_at,
+    )
+    stale_intents = strategy.generate_trade_intents(
+        detected_events=[event],
+        price_quotes=prices,
+        portfolio=portfolio,
+        now=event.detected_at + timedelta(hours=4),
+    )
+    no_trade_decisions = strategy.consume_no_trade_decisions()
+
+    assert len(fresh_intents) == 4
+    assert stale_intents == []
+    assert len(no_trade_decisions) == 1
+    assert no_trade_decisions[0].reason_code == "confidence_below_threshold"
+    assert "below threshold" in no_trade_decisions[0].reason.lower()
 
 
 def test_strategy_keeps_opposite_direction_thesis_separate() -> None:

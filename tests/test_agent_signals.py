@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from agent.signals import build_signal, build_trade_intent, select_quote_for_event
 from detection.event_detection import DetectedEvent
@@ -340,3 +340,79 @@ def test_select_quote_for_event_matches_new_toncoin_keywords() -> None:
 
     assert quote is not None
     assert quote.symbol_id == "ton_usd"
+
+
+def test_build_signal_decays_confidence_for_stale_events() -> None:
+    event = DetectedEvent(
+        raw_event_id="evt-stale",
+        event_type="ETF_APPROVAL",
+        rule_name="etf_approval",
+        confidence=0.9,
+        matched_text="bitcoin etf approval remains supportive",
+        detected_at=datetime(2026, 4, 4, 12, 0, tzinfo=UTC),
+    )
+    quote = PriceQuote(
+        symbol_id="btc_usd",
+        current=68_000.0,
+        open=66_000.0,
+        high=68_400.0,
+        low=65_800.0,
+        prev_close=65_500.0,
+        timestamp=1712232000,
+        asset_class="spot",
+    )
+
+    fresh_signal = build_signal(
+        event=event,
+        quote=quote,
+        evaluation_time=event.detected_at,
+        signal_decay_half_life_minutes=60,
+    )
+    stale_signal = build_signal(
+        event=event,
+        quote=quote,
+        evaluation_time=event.detected_at + timedelta(hours=4),
+        signal_decay_half_life_minutes=60,
+    )
+
+    assert stale_signal.confidence < fresh_signal.confidence
+    assert stale_signal.score < fresh_signal.score
+    assert any("time decay" in reason.lower() for reason in stale_signal.rationale)
+
+
+def test_build_signal_can_disable_time_decay() -> None:
+    event = DetectedEvent(
+        raw_event_id="evt-no-decay",
+        event_type="ETF_APPROVAL",
+        rule_name="etf_approval",
+        confidence=0.9,
+        matched_text="bitcoin etf approval remains supportive",
+        detected_at=datetime(2026, 4, 4, 12, 0, tzinfo=UTC),
+    )
+    quote = PriceQuote(
+        symbol_id="btc_usd",
+        current=68_000.0,
+        open=66_000.0,
+        high=68_400.0,
+        low=65_800.0,
+        prev_close=65_500.0,
+        timestamp=1712232000,
+        asset_class="spot",
+    )
+
+    fresh_signal = build_signal(
+        event=event,
+        quote=quote,
+        evaluation_time=event.detected_at,
+        signal_decay_half_life_minutes=60,
+    )
+    stale_signal = build_signal(
+        event=event,
+        quote=quote,
+        evaluation_time=event.detected_at + timedelta(hours=4),
+        signal_time_decay_enabled=False,
+        signal_decay_half_life_minutes=60,
+    )
+
+    assert stale_signal.confidence == fresh_signal.confidence
+    assert stale_signal.score == fresh_signal.score

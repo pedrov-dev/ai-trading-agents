@@ -405,11 +405,16 @@ def build_signal(
     price_confirmation_threshold: float = _DEFAULT_PRICE_CONFIRMATION_THRESHOLD,
     volume_spike_threshold: float = _DEFAULT_VOLUME_SPIKE_THRESHOLD,
     technical_breakout_volume_penalty: float = 0.15,
+    evaluation_time: datetime | None = None,
+    signal_time_decay_enabled: bool = True,
+    signal_decay_half_life_minutes: float = 360.0,
+    signal_decay_floor: float = 0.35,
 ) -> Signal:
     side = infer_trade_side(event.event_type)
     if side is None:
         raise ValueError(f"Unsupported event type for trading: {event.event_type}")
 
+    generated_at = event.detected_at or datetime.now(UTC)
     base_confidence = min(max(event.confidence, 0.0), 1.0)
     event_bias = abs(_EVENT_BIAS[event.event_type])
     price_move = _price_momentum(quote)
@@ -426,8 +431,25 @@ def build_signal(
     volatility_multiplier, volatility_rationale = _volatility_adjustment(quote)
     event_novelty_score, novelty_rationale = _event_novelty_adjustment(event)
     novelty_multiplier = 0.65 + (event_novelty_score * 0.35)
+    signal_age_minutes = _resolve_signal_age_minutes(
+        generated_at=generated_at,
+        quote=quote,
+        evaluation_time=evaluation_time,
+    )
+    time_decay_factor, time_decay_rationale = _signal_time_decay_factor(
+        age_minutes=signal_age_minutes,
+        enabled=signal_time_decay_enabled,
+        half_life_minutes=signal_decay_half_life_minutes,
+        floor=signal_decay_floor,
+    )
     effective_confidence = min(
-        max(base_confidence * volatility_multiplier * novelty_multiplier, 0.0),
+        max(
+            base_confidence
+            * volatility_multiplier
+            * novelty_multiplier
+            * time_decay_factor,
+            0.0,
+        ),
         1.0,
     )
 
@@ -489,9 +511,10 @@ def build_signal(
         rationale_items.append(novelty_rationale)
     if volatility_rationale is not None:
         rationale_items.append(volatility_rationale)
+    if time_decay_rationale is not None:
+        rationale_items.append(time_decay_rationale)
     rationale = tuple(rationale_items)
 
-    generated_at = event.detected_at or datetime.now(UTC)
     event_group = event_performance_group(event.event_type)
     thesis_tokens = _extract_thesis_tokens(event=event, symbol_id=quote.symbol_id)
     return Signal(
@@ -729,6 +752,48 @@ def _volume_confirmation_state(
 
 def _clamp_signal_score(value: float) -> float:
     return round(min(max(value, 0.0), 1.0), 4)
+
+
+def _resolve_signal_age_minutes(
+    *,
+    generated_at: datetime,
+    quote: PriceQuote,
+    evaluation_time: datetime | None,
+) -> float:
+    resolved_evaluation_time = evaluation_time
+    if resolved_evaluation_time is None and quote.timestamp > 0:
+        try:
+            resolved_evaluation_time = datetime.fromtimestamp(quote.timestamp, tz=UTC)
+        except (OverflowError, OSError, ValueError):
+            resolved_evaluation_time = None
+
+    if resolved_evaluation_time is None:
+        return 0.0
+
+    return max((resolved_evaluation_time - generated_at).total_seconds() / 60.0, 0.0)
+
+
+def _signal_time_decay_factor(
+    *,
+    age_minutes: float,
+    enabled: bool,
+    half_life_minutes: float,
+    floor: float,
+) -> tuple[float, str | None]:
+    if not enabled or age_minutes <= 0 or half_life_minutes <= 0:
+        return 1.0, None
+
+    bounded_floor = min(max(floor, 0.0), 1.0)
+    decay_factor = max(bounded_floor, 0.5 ** (age_minutes / half_life_minutes))
+    rounded_factor = round(decay_factor, 4)
+    if rounded_factor >= 0.9999:
+        return 1.0, None
+
+    return (
+        rounded_factor,
+        "Signal time decay reduced confidence with age: "
+        f"{age_minutes:.1f} stale minute(s) -> factor {rounded_factor:.2f}.",
+    )
 
 
 def _price_momentum(quote: PriceQuote) -> float:

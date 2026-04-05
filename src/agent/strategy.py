@@ -42,6 +42,9 @@ class StrategyConfig:
     thesis_cooldown_hours: int = 6
     thesis_repeat_penalty: float = 0.12
     thesis_similarity_threshold: float = 0.75
+    signal_time_decay_enabled: bool = True
+    signal_decay_half_life_minutes: float = 360.0
+    signal_decay_floor: float = 0.35
     volatility_filter_enabled: bool = True
     min_meaningful_volatility_filter: float = 0.8
 
@@ -179,9 +182,15 @@ class SimpleEventDrivenStrategy:
         detected_events: list[DetectedEvent],
         price_quotes: list[PriceQuote],
         portfolio: PortfolioSnapshot,
+        now: datetime | None = None,
     ) -> list[TradeIntent]:
         ranked_signals: dict[str, RankedSignal] = {}
         self._last_no_trade_decisions = []
+        evaluation_time = _resolve_strategy_evaluation_time(
+            detected_events=detected_events,
+            price_quotes=price_quotes,
+            now=now,
+        )
 
         for event in detected_events:
             quote = select_quote_for_event(event=event, price_quotes=price_quotes)
@@ -194,6 +203,10 @@ class SimpleEventDrivenStrategy:
                     quote=quote,
                     price_confirmation_threshold=self._config.price_confirmation_move_threshold,
                     volume_spike_threshold=self._config.volume_spike_threshold,
+                    evaluation_time=evaluation_time,
+                    signal_time_decay_enabled=self._config.signal_time_decay_enabled,
+                    signal_decay_half_life_minutes=self._config.signal_decay_half_life_minutes,
+                    signal_decay_floor=self._config.signal_decay_floor,
                 )
             except ValueError:
                 continue
@@ -910,6 +923,31 @@ class SimpleEventDrivenStrategy:
             stop_distance_fraction=risk_reward_estimate.stop_distance_fraction,
             risk_reward_ratio=risk_reward_estimate.risk_reward_ratio,
         )
+
+
+def _resolve_strategy_evaluation_time(
+    *,
+    detected_events: list[DetectedEvent],
+    price_quotes: list[PriceQuote],
+    now: datetime | None,
+) -> datetime | None:
+    if now is not None:
+        return now
+
+    candidate_times: list[datetime] = [
+        event.detected_at for event in detected_events if event.detected_at is not None
+    ]
+    for quote in price_quotes:
+        if quote.timestamp <= 0:
+            continue
+        try:
+            candidate_times.append(datetime.fromtimestamp(quote.timestamp, tz=UTC))
+        except (OverflowError, OSError, ValueError):
+            continue
+
+    if not candidate_times:
+        return None
+    return max(candidate_times)
 
 
 def _thesis_similarity(*, signal: Signal, state: _ThesisCooldownState) -> float:
