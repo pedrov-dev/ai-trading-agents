@@ -208,12 +208,39 @@ def build_execution_rows(payload: Mapping[str, Any] | None) -> list[dict[str, An
                 "symbol_id": str(
                     request.get("symbol_id") or item.get("symbol_id") or "-"
                 ),
-                "side": str(request.get("side") or "-"),
+                "side": str(request.get("side") or item.get("side") or "-"),
                 "status": str(item.get("status") or "unknown"),
-                "filled_quantity": _as_float(fill.get("filled_quantity")),
-                "average_price": _as_float(fill.get("average_price")),
-                "client_order_id": str(request.get("client_order_id") or "-"),
+                "filled_quantity": _as_float(
+                    fill.get("filled_quantity") or item.get("filled_quantity")
+                ),
+                "average_price": _as_float(
+                    fill.get("average_price") or item.get("average_price")
+                ),
+                "client_order_id": str(
+                    request.get("client_order_id") or item.get("client_order_id") or "-"
+                ),
                 "completed_at": str(item.get("completed_at") or ""),
+            }
+        )
+    return rows
+
+
+def build_activity_rows(activity_records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Flatten live activity updates into a concise table for the dashboard."""
+    rows: list[dict[str, Any]] = []
+    for record in activity_records:
+        affects = record.get("affects")
+        affects_text = ""
+        if isinstance(affects, Sequence) and not isinstance(affects, (str, bytes)):
+            affects_text = ", ".join(str(item) for item in affects)
+        rows.append(
+            {
+                "timestamp": str(record.get("timestamp") or ""),
+                "stage": str(record.get("stage") or "runtime"),
+                "action": str(record.get("action") or "-"),
+                "status": str(record.get("status") or "-"),
+                "summary": str(record.get("summary") or ""),
+                "affects": affects_text,
             }
         )
     return rows
@@ -412,9 +439,10 @@ def render_dashboard() -> None:
             streamlit.write("No execution results available yet.")
 
         activity_records = load_jsonl_records(artifact_paths["activity"])
+        activity_rows = build_activity_rows(activity_records)
         streamlit.subheader("Live activity log")
-        if activity_records:
-            streamlit.dataframe(activity_records[-15:], width='stretch')
+        if activity_rows:
+            streamlit.dataframe(activity_rows[-15:], width='stretch')
         else:
             streamlit.write("No incremental actions written yet.")
 
@@ -517,7 +545,7 @@ def _get_or_create_app(
 
 
 def _payload_from_result(result: RuntimeCycleResult, app: TradingApplication) -> dict[str, Any]:
-    payload = result.to_dict()
+    payload = result.to_summary_dict()
     payload["trading_mode"] = getattr(app, "_trading_mode", "paper")
     payload["identity_layer"] = getattr(app, "_identity_layer", "none")
     payload["runtime_mode"] = getattr(app, "_runtime_mode", "local")

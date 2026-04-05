@@ -309,12 +309,19 @@ def test_run_cycle_writes_incremental_action_log_and_summary_state(tmp_path: Pat
     assert activity_records[-1]["action"] == "cycle_completed"
     assert any(record["action"] == "artifact_recorded" for record in activity_records)
     assert all("affects" in record for record in activity_records)
+    assert all("summary" in record for record in activity_records)
+    assert all("payload" not in record for record in activity_records)
 
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     assert summary["status"] == "completed"
     assert summary["counts"]["artifacts"] == result.artifact_count
     assert summary["counts"]["checkpoints"] == result.checkpoint_count
     assert summary["last_action"]["action"] == "cycle_completed"
+    assert "artifacts" not in summary
+    assert "checkpoints" not in summary
+    assert "recent_events" not in summary["audit_summary"]
+    assert "rationale" not in summary["trade_intents"][0]
+    assert "request" not in summary["execution_results"][0]
 
 
 def test_local_demo_app_restores_portfolio_from_trade_journal(tmp_path: Path) -> None:

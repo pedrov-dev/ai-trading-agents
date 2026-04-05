@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from agent.portfolio import LocalPortfolioStateProvider, PortfolioSnapshot
 from agent.signals import TradeIntent
@@ -195,25 +195,121 @@ class RuntimeCycleResult:
         }
 
     def to_summary_dict(self) -> dict[str, Any]:
-        payload = self.to_dict()
-        payload.pop("artifacts", None)
-        payload.pop("checkpoints", None)
-        payload["status"] = "completed"
-        payload["updated_at"] = self.portfolio.as_of.isoformat()
-        payload["counts"] = {
-            "detected_events": len(self.detected_events),
-            "trade_intents": len(self.trade_intents),
-            "executions": len(self.execution_results),
-            "artifacts": self.artifact_count,
-            "checkpoints": self.checkpoint_count,
-        }
-        payload["last_action"] = {
-            "action": "cycle_completed",
+        return {
             "status": "completed",
-            "occurred_at": self.portfolio.as_of.isoformat(),
-            "affects": ["run_summary", "portfolio", "pnl_snapshot", "drawdown_snapshot"],
+            "updated_at": self.portfolio.as_of.isoformat(),
+            "rss_result": {
+                "run_id": self.rss_result.run_id,
+                "status": self.rss_result.status,
+                "fetched_count": self.rss_result.fetched_count,
+                "inserted_count": self.rss_result.inserted_count,
+                "duplicate_count": self.rss_result.duplicate_count,
+            },
+            "prices_result": {
+                "run_id": self.prices_result.run_id,
+                "status": self.prices_result.status,
+                "fetched_count": self.prices_result.fetched_count,
+                "inserted_count": self.prices_result.inserted_count,
+                "duplicate_count": self.prices_result.duplicate_count,
+            },
+            "classification_count": self.classification_count,
+            "counts": {
+                "detected_events": len(self.detected_events),
+                "trade_intents": len(self.trade_intents),
+                "executions": len(self.execution_results),
+                "artifacts": self.artifact_count,
+                "checkpoints": self.checkpoint_count,
+            },
+            "detected_events": [
+                {
+                    "raw_event_id": event.raw_event_id,
+                    "event_type": event.event_type,
+                    "rule_name": event.rule_name,
+                    "confidence": event.confidence,
+                    "detected_at": event.detected_at.isoformat()
+                    if event.detected_at
+                    else None,
+                }
+                for event in self.detected_events[-10:]
+            ],
+            "trade_intents": [
+                {
+                    "symbol_id": intent.symbol_id,
+                    "side": intent.side,
+                    "notional_usd": round(intent.notional_usd, 2),
+                    "quantity": round(intent.quantity, 8),
+                    "score": intent.score,
+                    "generated_at": intent.generated_at.isoformat(),
+                }
+                for intent in self.trade_intents[-10:]
+            ],
+            "execution_results": [
+                {
+                    "symbol_id": result.request.symbol_id,
+                    "side": result.request.side,
+                    "status": result.status.value,
+                    "filled_quantity": (
+                        round(result.fill.filled_quantity, 8)
+                        if result.fill is not None
+                        else 0.0
+                    ),
+                    "average_price": (
+                        round(result.fill.average_price, 8)
+                        if result.fill is not None
+                        else 0.0
+                    ),
+                    "client_order_id": result.request.client_order_id,
+                    "completed_at": result.completed_at.isoformat(),
+                }
+                for result in self.execution_results[-10:]
+            ],
+            "portfolio": {
+                "total_equity": self.portfolio.total_equity,
+                "cash_usd": self.portfolio.cash_usd,
+                "open_position_count": self.portfolio.open_position_count(),
+                "realized_pnl_today": self.portfolio.realized_pnl_today,
+                "as_of": self.portfolio.as_of.isoformat(),
+            },
+            "pnl_snapshot": self.pnl_snapshot.to_dict(),
+            "drawdown_snapshot": self.drawdown_snapshot.to_dict(),
+            "audit_summary": {
+                "total_events": self.audit_summary.total_events,
+                "failure_count": self.audit_summary.failure_count,
+                "fill_count": self.audit_summary.fill_count,
+                "status_counts": dict(self.audit_summary.status_counts),
+                "event_counts": dict(self.audit_summary.event_counts),
+                "symbol_counts": dict(self.audit_summary.symbol_counts),
+                "last_recorded_at": self.audit_summary.last_recorded_at.isoformat()
+                if self.audit_summary.last_recorded_at
+                else None,
+            },
+            "journal_summary": {
+                "total_entries": self.journal_summary.total_entries,
+                "closed_trade_count": self.journal_summary.closed_trade_count,
+                "open_position_count": self.journal_summary.open_position_count,
+                "realized_pnl_usd": self.journal_summary.realized_pnl_usd,
+                "win_count": self.journal_summary.win_count,
+                "loss_count": self.journal_summary.loss_count,
+                "event_counts": dict(self.journal_summary.event_counts),
+                "symbol_counts": dict(self.journal_summary.symbol_counts),
+                "open_positions": dict(self.journal_summary.open_positions),
+                "last_recorded_at": self.journal_summary.last_recorded_at.isoformat()
+                if self.journal_summary.last_recorded_at
+                else None,
+            },
+            "reputation": self.reputation.to_dict(),
+            "last_action": {
+                "action": "cycle_completed",
+                "status": "completed",
+                "occurred_at": self.portfolio.as_of.isoformat(),
+                "affects": [
+                    "run_summary",
+                    "portfolio",
+                    "pnl_snapshot",
+                    "drawdown_snapshot",
+                ],
+            },
         }
-        return payload
 
 
 class LocalArtifactLedger:
@@ -341,12 +437,21 @@ class LocalArtifactLedger:
         count_updates: Mapping[str, int] | None = None,
     ) -> dict[str, Any]:
         timestamp = (occurred_at or datetime.now(UTC)).isoformat()
+        affects_list = [str(item) for item in affects if str(item)]
+        detail_map = dict(details or {})
         record = {
             "timestamp": timestamp,
+            "stage": self._stage_for_action(action),
             "action": action,
             "status": status,
-            "affects": [str(item) for item in affects if str(item)],
-            "details": dict(details or {}),
+            "summary": self._summarize_action(
+                action=action,
+                status=status,
+                affects=affects_list,
+                details=detail_map,
+            ),
+            "affects": affects_list,
+            "details": detail_map,
         }
         if summary_updates:
             for key, value in summary_updates.items():
@@ -373,6 +478,58 @@ class LocalArtifactLedger:
         self._activity_store.append(record)
         self._summary_store.write_json(self._summary_state)
         return record
+
+    @staticmethod
+    def _stage_for_action(action: str) -> str:
+        stage_map = {
+            "cycle_started": "cycle",
+            "cycle_completed": "cycle",
+            "events_detected": "detection",
+            "trade_intents_generated": "strategy",
+            "execution_skipped": "execution",
+            "execution_recorded": "execution",
+            "portfolio_updated": "portfolio",
+            "artifact_recorded": "validation",
+            "checkpoint_recorded": "validation",
+            "performance_snapshot_updated": "monitoring",
+        }
+        return stage_map.get(action, "runtime")
+
+    @staticmethod
+    def _summarize_action(
+        *,
+        action: str,
+        status: str,
+        affects: list[str],
+        details: Mapping[str, Any],
+    ) -> str:
+        if action == "cycle_started":
+            return "Cycle started and live summary tracking is active."
+        if action == "events_detected":
+            return (
+                f"Detected {details.get('count', 0)} new market events for strategy review."
+            )
+        if action == "trade_intents_generated":
+            intent_type = details.get("intent_type", "trade")
+            return f"Generated {details.get('count', 0)} {intent_type} intents."
+        if action == "execution_skipped":
+            return "Execution was blocked by the runtime risk re-check."
+        if action == "execution_recorded":
+            symbol_id = details.get("client_order_id") or "order"
+            return f"Recorded execution outcome for {symbol_id} ({status})."
+        if action == "portfolio_updated":
+            return "Portfolio state changed after a successful fill."
+        if action == "artifact_recorded":
+            return f"Saved {details.get('artifact_kind', 'validation')} evidence and checkpoint."
+        if action == "checkpoint_recorded":
+            return "Saved a standalone validation checkpoint update."
+        if action == "performance_snapshot_updated":
+            return "Updated headline portfolio, PnL, and drawdown metrics."
+        if action == "cycle_completed":
+            return "Cycle finished and the summary snapshot is finalized."
+        if affects:
+            return f"Recorded {action} affecting {', '.join(affects[:3])}."
+        return f"Recorded {action} ({status})."
 
     def record(
         self,
@@ -1005,7 +1162,7 @@ class TradingApplication:
         evaluate_position_exits = getattr(self._strategy, "evaluate_position_exits", None)
         exit_intents = (
             tuple(
-                evaluate_position_exits(
+                cast(Any, evaluate_position_exits)(
                     portfolio=current_portfolio,
                     price_quotes=list(self._latest_quotes),
                     detected_events=list(detected_events),
