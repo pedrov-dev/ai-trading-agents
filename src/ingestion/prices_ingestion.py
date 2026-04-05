@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
+from statistics import fmean, pstdev
 from typing import TYPE_CHECKING, Any
 
 import requests
@@ -29,6 +30,9 @@ class PriceQuote:
     prev_close: float
     timestamp: int
     asset_class: str
+    atr: float | None = None
+    realized_volatility: float | None = None
+    volatility_filter: float | None = None
 
     @property
     def dedup_hash(self) -> str:
@@ -46,6 +50,15 @@ class HistoricalBar:
     low: float
     close: float
     volume: float
+
+
+@dataclass(frozen=True)
+class _VolatilityMetrics:
+    """Pre-computed ATR and realized volatility for a single symbol."""
+
+    atr: float | None = None
+    realized_volatility: float | None = None
+    volatility_filter: float | None = None
 
 
 def _default_http_get(url: str, params: dict[str, str]) -> dict[str, Any]:
@@ -69,13 +82,22 @@ class PricesIngestionService:
         self,
         symbols: list[PriceSymbol],
         http_get: Callable[[str, dict[str, str]], dict[str, Any]] | None = None,
+        atr_lookback_bars: int = 14,
+        realized_volatility_lookback_bars: int = 20,
+        enrich_volatility_metrics: bool = False,
     ) -> None:
         self._symbols = symbols
         self._http_get = http_get or _default_http_get
+        self._atr_lookback_bars = max(2, atr_lookback_bars)
+        self._realized_volatility_lookback_bars = max(2, realized_volatility_lookback_bars)
+        self._enrich_volatility_metrics = enrich_volatility_metrics
 
     def fetch_current_prices(self) -> list[PriceQuote]:
         quotes: list[PriceQuote] = []
         observed_at = int(datetime.now(UTC).timestamp())
+        volatility_metrics = (
+            self._build_volatility_metrics() if self._enrich_volatility_metrics else {}
+        )
 
         for symbol in self._symbols:
             payload = self._http_get(
@@ -83,6 +105,7 @@ class PricesIngestionService:
                 self._quote_params(symbol),
             )
             ticker_data = self._extract_result_entry(payload, symbol)
+            metrics = volatility_metrics.get(symbol.symbol_id, _VolatilityMetrics())
             quotes.append(
                 PriceQuote(
                     symbol_id=symbol.symbol_id,
@@ -93,6 +116,9 @@ class PricesIngestionService:
                     prev_close=self._first_float(ticker_data.get("p")),
                     timestamp=observed_at,
                     asset_class=symbol.asset_class,
+                    atr=metrics.atr,
+                    realized_volatility=metrics.realized_volatility,
+                    volatility_filter=metrics.volatility_filter,
                 )
             )
         return quotes
@@ -124,6 +150,75 @@ class PricesIngestionService:
                 )
 
         return bars
+
+    def _build_volatility_metrics(self) -> dict[str, _VolatilityMetrics]:
+        lookback_days = max(
+            self._atr_lookback_bars,
+            self._realized_volatility_lookback_bars,
+        ) + 2
+        end_date = datetime.now(UTC).date()
+        start_date = end_date - timedelta(days=lookback_days)
+
+        try:
+            bars = self.fetch_historical_prices(start=start_date, end=end_date)
+        except Exception:
+            return {}
+
+        bars_by_symbol: dict[str, list[HistoricalBar]] = {}
+        for bar in bars:
+            bars_by_symbol.setdefault(bar.symbol_id, []).append(bar)
+
+        return {
+            symbol_id: self._calculate_volatility_metrics(symbol_bars)
+            for symbol_id, symbol_bars in bars_by_symbol.items()
+        }
+
+    def _calculate_volatility_metrics(
+        self,
+        bars: list[HistoricalBar],
+    ) -> _VolatilityMetrics:
+        ordered_bars = sorted(bars, key=lambda bar: bar.timestamp)
+        if len(ordered_bars) < 2:
+            return _VolatilityMetrics()
+
+        atr_bars = ordered_bars[-self._atr_lookback_bars :]
+        true_ranges: list[float] = []
+        previous_close: float | None = None
+        for bar in atr_bars:
+            true_range = max(bar.high - bar.low, 0.0)
+            if previous_close is not None:
+                true_range = max(
+                    true_range,
+                    abs(bar.high - previous_close),
+                    abs(bar.low - previous_close),
+                )
+            true_ranges.append(true_range)
+            previous_close = bar.close
+        atr = round(fmean(true_ranges), 4) if true_ranges else None
+
+        rv_bars = ordered_bars[-self._realized_volatility_lookback_bars :]
+        close_returns: list[float] = []
+        previous_close = None
+        for bar in rv_bars:
+            if previous_close is not None and previous_close > 0:
+                close_returns.append((bar.close - previous_close) / previous_close)
+            previous_close = bar.close
+        realized_volatility = round(pstdev(close_returns), 6) if len(close_returns) >= 2 else None
+
+        latest_close = ordered_bars[-1].close
+        volatility_filter = None
+        if atr is not None and realized_volatility is not None and latest_close > 0:
+            normalized_atr = atr / latest_close
+            volatility_filter = round(
+                normalized_atr / max(realized_volatility, 0.0001),
+                4,
+            )
+
+        return _VolatilityMetrics(
+            atr=atr,
+            realized_volatility=realized_volatility,
+            volatility_filter=volatility_filter,
+        )
 
     @staticmethod
     def _to_unix(value: date) -> int:

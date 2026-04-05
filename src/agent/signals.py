@@ -256,18 +256,27 @@ def build_signal(*, event: DetectedEvent, quote: PriceQuote) -> Signal:
     if side is None:
         raise ValueError(f"Unsupported event type for trading: {event.event_type}")
 
+    base_confidence = min(max(event.confidence, 0.0), 1.0)
     event_bias = abs(_EVENT_BIAS[event.event_type])
     price_move = _price_momentum(quote)
     aligned_move = max(price_move, 0.0) if side == "buy" else max(-price_move, 0.0)
     price_bonus = min(aligned_move * 3.0, 0.12)
-    score = min(1.0, round((event.confidence * 0.72) + (event_bias * 0.18) + price_bonus, 4))
+    volatility_multiplier, volatility_rationale = _volatility_adjustment(quote)
+    effective_confidence = min(max(base_confidence * volatility_multiplier, 0.0), 1.0)
+    score = min(
+        1.0,
+        round((effective_confidence * 0.72) + (event_bias * 0.18) + price_bonus, 4),
+    )
 
     bias_label = "bullish" if side == "buy" else "bearish"
-    rationale = (
+    rationale_items = [
         f"{bias_label.title()} event bias from {event.event_type}",
-        f"Event confidence contributed {event.confidence:.2f} to the opportunity score.",
+        f"Event confidence contributed {base_confidence:.2f} to the opportunity score.",
         f"Price confirmation move: {price_move * 100:.2f}% from the session open.",
-    )
+    ]
+    if volatility_rationale is not None:
+        rationale_items.append(volatility_rationale)
+    rationale = tuple(rationale_items)
 
     generated_at = event.detected_at or datetime.now(UTC)
     event_group = event_performance_group(event.event_type)
@@ -283,7 +292,7 @@ def build_signal(*, event: DetectedEvent, quote: PriceQuote) -> Signal:
         event_type=event.event_type,
         symbol_id=quote.symbol_id,
         side=side,
-        confidence=event.confidence,
+        confidence=round(effective_confidence, 4),
         score=score,
         current_price=quote.current,
         generated_at=generated_at,
@@ -359,6 +368,51 @@ def _price_momentum(quote: PriceQuote) -> float:
     if quote.open <= 0:
         return 0.0
     return (quote.current - quote.open) / quote.open
+
+
+def _volatility_adjustment(quote: PriceQuote) -> tuple[float, str | None]:
+    atr = quote.atr
+    realized_volatility = quote.realized_volatility
+    volatility_filter = quote.volatility_filter
+
+    if (
+        volatility_filter is None
+        and atr is not None
+        and realized_volatility is not None
+        and quote.current > 0
+        and realized_volatility > 0
+    ):
+        volatility_filter = (atr / quote.current) / max(realized_volatility, 0.0001)
+
+    if volatility_filter is None or volatility_filter <= 0:
+        return 1.0, None
+
+    bounded_filter = min(max(volatility_filter, 0.0), 3.0)
+    atr_label = f"ATR={atr:,.2f}" if atr is not None else "ATR=n/a"
+    rv_label = (
+        f"realized_volatility={realized_volatility:.4f}"
+        if realized_volatility is not None
+        else "realized_volatility=n/a"
+    )
+    if bounded_filter < 1.0:
+        multiplier = max(0.65, 1.0 - ((1.0 - bounded_filter) * 0.35))
+        return (
+            round(multiplier, 4),
+            "Low volatility weakened the signal: "
+            f"volatility_filter={bounded_filter:.2f}, {atr_label}, {rv_label}.",
+        )
+    if bounded_filter > 1.0:
+        multiplier = min(1.2, 1.0 + ((bounded_filter - 1.0) * 0.2))
+        return (
+            round(multiplier, 4),
+            "High volatility strengthened the signal: "
+            f"volatility_filter={bounded_filter:.2f}, {atr_label}, {rv_label}.",
+        )
+    return (
+        1.0,
+        "Volatility stayed neutral for this setup: "
+        f"volatility_filter={bounded_filter:.2f}, {atr_label}, {rv_label}.",
+    )
 
 
 def _extract_thesis_tokens(*, event: DetectedEvent, symbol_id: str) -> tuple[str, ...]:

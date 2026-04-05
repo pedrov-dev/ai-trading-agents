@@ -60,6 +60,7 @@ The default runtime opportunity budget is already conservative:
 
 - `--max-positions 3` keeps the book focused on the top three concurrent symbols
 - `--max-per-asset 1` prevents the strategy from stacking every slot into BTC and forces it to keep searching for the next best asset
+- volatility awareness now weakens signals in low-volatility regimes, strengthens them in high-volatility regimes, and skips entries when `volatility_filter = (ATR / price) / realized_volatility` falls below the meaningful threshold
 
 Artifacts written after the run:
 

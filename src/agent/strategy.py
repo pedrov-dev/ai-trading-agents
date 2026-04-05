@@ -37,6 +37,8 @@ class StrategyConfig:
     thesis_cooldown_hours: int = 6
     thesis_repeat_penalty: float = 0.12
     thesis_similarity_threshold: float = 0.75
+    volatility_filter_enabled: bool = True
+    min_meaningful_volatility_filter: float = 0.8
 
 
 @dataclass(frozen=True)
@@ -160,6 +162,35 @@ class SimpleEventDrivenStrategy:
             try:
                 base_signal = build_signal(event=event, quote=quote)
             except ValueError:
+                continue
+
+            volatility_filter = _resolve_quote_volatility_filter(quote)
+            if (
+                self._config.volatility_filter_enabled
+                and volatility_filter is not None
+                and volatility_filter < self._config.min_meaningful_volatility_filter
+            ):
+                atr_label = (
+                    f"ATR={quote.atr:,.2f}"
+                    if quote.atr is not None
+                    else "ATR=n/a"
+                )
+                rv_label = (
+                    f"realized_volatility={quote.realized_volatility:.4f}"
+                    if quote.realized_volatility is not None
+                    else "realized_volatility=n/a"
+                )
+                self._record_no_trade_decision(
+                    signal=base_signal,
+                    reason_code="volatility_not_meaningful",
+                    reason=(
+                        f"Volatility filter {volatility_filter:.2f} is below the "
+                        "meaningful threshold "
+                        f"{self._config.min_meaningful_volatility_filter:.2f}; "
+                        f"{atr_label}, {rv_label}."
+                    ),
+                    threshold=min(max(self._config.min_meaningful_volatility_filter, 0.0), 1.0),
+                )
                 continue
 
             recent_theses = self._recent_thesis_states(signal=base_signal)
@@ -823,6 +854,25 @@ def _jaccard_similarity(left: tuple[str, ...], right: tuple[str, ...]) -> float:
 
 def _clamp_score(value: float) -> float:
     return round(min(max(value, 0.0), 1.0), 4)
+
+
+def _resolve_quote_volatility_filter(quote: PriceQuote) -> float | None:
+    raw_filter = quote.volatility_filter
+    if raw_filter is not None and raw_filter > 0:
+        return round(raw_filter, 4)
+
+    atr = quote.atr
+    realized_volatility = quote.realized_volatility
+    if (
+        atr is None
+        or atr <= 0
+        or realized_volatility is None
+        or realized_volatility <= 0
+        or quote.current <= 0
+    ):
+        return None
+
+    return round((atr / quote.current) / max(realized_volatility, 0.0001), 4)
 
 
 def _build_horizon_trade_intents(

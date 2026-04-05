@@ -759,6 +759,7 @@ class TradingApplication:
         self._prices_service = PricesIngestionService(
             symbols=symbols,
             http_get=http_get,
+            enrich_volatility_metrics=True,
         )
         self._detection_service = EventDetectionService(
             detector=RuleBasedEventDetector(),

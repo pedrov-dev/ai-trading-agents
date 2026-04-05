@@ -477,6 +477,55 @@ def test_strategy_decays_similar_macro_thesis_across_different_headlines() -> No
     assert any("similar thesis" in reason.lower() for reason in repeated_intents[0].rationale)
 
 
+def test_strategy_skips_trade_when_volatility_is_not_meaningful() -> None:
+    strategy = SimpleEventDrivenStrategy(
+        config=StrategyConfig(
+            min_signal_score=0.7,
+            min_confidence_score=0.7,
+            min_meaningful_volatility_filter=0.8,
+        ),
+        risk_config=RiskConfig(max_position_fraction=0.05),
+    )
+    portfolio = PortfolioSnapshot(total_equity=10_000.0, cash_usd=10_000.0)
+    events = [
+        DetectedEvent(
+            raw_event_id="evt-low-vol-skip",
+            event_type="ETF_APPROVAL",
+            rule_name="etf_approval",
+            confidence=0.9,
+            matched_text="bitcoin etf approval",
+            detected_at=datetime(2026, 4, 3, 12, 15, tzinfo=UTC),
+        )
+    ]
+    prices = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=68_000.0,
+            open=67_900.0,
+            high=68_200.0,
+            low=67_850.0,
+            prev_close=67_880.0,
+            timestamp=1712100000,
+            asset_class="spot",
+            atr=250.0,
+            realized_volatility=0.019,
+            volatility_filter=0.19,
+        )
+    ]
+
+    intents = strategy.generate_trade_intents(
+        detected_events=events,
+        price_quotes=prices,
+        portfolio=portfolio,
+    )
+    no_trade_decisions = strategy.consume_no_trade_decisions()
+
+    assert intents == []
+    assert len(no_trade_decisions) == 1
+    assert no_trade_decisions[0].reason_code == "volatility_not_meaningful"
+    assert "volatility filter" in no_trade_decisions[0].reason.lower()
+
+
 def test_strategy_keeps_opposite_direction_thesis_separate() -> None:
     strategy = SimpleEventDrivenStrategy(
         config=StrategyConfig(
