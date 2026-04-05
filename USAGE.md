@@ -151,9 +151,30 @@ If registration succeeds, the numeric `AGENT_ID` is persisted to `.runtime.env` 
 
 ---
 
+## 8) Blank-slate reset
+
+Use this when you want to wipe the current runtime state and start over.
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python src/main.py --base-dir . --reset-storage
+```
+
+What it attempts to clear:
+
+- local `artifacts/` files
+- the configured Postgres runtime tables
+- raw payload objects under the configured R2 bucket prefix
+- `.runtime.env`
+
+> If the command returns `status: partial`, your local files were still cleaned up, but the Postgres password or the R2 list/delete permissions need to be fixed before the remote state can be fully wiped.
+
+---
+
 ## Quick troubleshooting
 
 - Check all CLI options with `python src/main.py --help`.
 - Use `python src/main.py --base-dir . --preflight` to inspect readiness without sending a request cycle.
+- Use `python src/main.py --base-dir . --reset-storage` for a clean restart.
 - If the ERC-8004 layer reports missing config, export the required variables first.
 - `--serve` cannot be combined with the on-chain action flags.

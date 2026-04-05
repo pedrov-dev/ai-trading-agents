@@ -13,24 +13,29 @@ from identity.erc8004_registry import SepoliaContractsConfig
 from ingestion.prices_config import PRICE_SYMBOLS
 from ingestion.prices_ingestion import PriceQuote
 from ingestion.rss_config import FeedSource
-from main import build_local_demo_app, build_runtime_preflight, validate_runtime_requirements
-from storage.local_runtime import (
-    InMemoryEventDetectionRepository,
-    InMemoryIngestionRunsRepository,
-    InMemoryRawEventsRepository,
-    LocalFileObjectStore,
+from main import (
+    build_local_demo_app,
+    build_runtime_preflight,
+    reset_runtime_state,
+    validate_runtime_requirements,
 )
 from storage.raw_postgres import PostgresIngestionRunsRepository, PostgresRawEventsRepository
+from tests.storage_fakes import (
+    StubEventDetectionRepository,
+    StubIngestionRunsRepository,
+    StubObjectStore,
+    StubRawEventsRepository,
+)
 
 BTC_SYMBOL = next(symbol for symbol in PRICE_SYMBOLS if symbol.symbol_id == "btc_usd")
 
 
 def _storage_overrides(tmp_path: Path) -> dict[str, object]:
     return {
-        "runs_repository": InMemoryIngestionRunsRepository(),
-        "raw_events_repository": InMemoryRawEventsRepository(),
-        "event_repository": InMemoryEventDetectionRepository(),
-        "object_store": LocalFileObjectStore(tmp_path / "artifacts" / "raw_payloads"),
+        "runs_repository": StubIngestionRunsRepository(),
+        "raw_events_repository": StubRawEventsRepository(),
+        "event_repository": StubEventDetectionRepository(),
+        "object_store": StubObjectStore(tmp_path / "artifacts" / "raw_payloads"),
     }
 
 
@@ -663,6 +668,38 @@ def test_build_runtime_preflight_reports_live_mode_blockers(tmp_path: Path) -> N
 
     assert report["status"] == "error"
     assert any("KRAKEN_CLI_ALLOW_LIVE_SUBMIT" in issue for issue in report["issues"])
+
+
+def test_reset_runtime_state_clears_local_artifacts_and_runtime_env(tmp_path: Path) -> None:
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir(parents=True)
+    for path in (
+        artifacts_dir / "orders_audit.jsonl",
+        artifacts_dir / "trading_journal.jsonl",
+        artifacts_dir / "validation_artifacts.jsonl",
+        artifacts_dir / "validation_checkpoints.jsonl",
+        artifacts_dir / "activity_log.jsonl",
+        artifacts_dir / "run_summary.json",
+    ):
+        path.write_text('{"status":"stale"}\n', encoding="utf-8")
+
+    raw_path = artifacts_dir / "raw_payloads" / "raw" / "source_type=prices"
+    raw_path.mkdir(parents=True)
+    (raw_path / "sample.json.gz").write_text("stale", encoding="utf-8")
+    runtime_env_path = tmp_path / ".runtime.env"
+    runtime_env_path.write_text("AGENT_ID=77\n", encoding="utf-8")
+
+    report = reset_runtime_state(
+        base_dir=tmp_path,
+        env={},
+        reset_postgres=False,
+        reset_object_store=False,
+    )
+
+    assert report["local_artifacts_removed"] >= 6
+    assert report["runtime_env_removed"] is True
+    assert not runtime_env_path.exists()
+    assert not any(artifacts_dir.iterdir())
 
 
 def test_execute_trade_cycle_skips_execution_when_runtime_risk_recheck_fails(

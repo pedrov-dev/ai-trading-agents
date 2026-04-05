@@ -247,6 +247,28 @@ class S3CompatibleObjectStore:
         response = self._s3_client.get_object(Bucket=self._bucket, Key=key)
         return response["Body"].read()
 
+    def delete_prefix(self, *, prefix: str) -> int:
+        """Delete all objects under a prefix and return the number of deleted keys."""
+
+        deleted = 0
+        paginator = self._s3_client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+            contents = page.get("Contents") or []
+            if not contents:
+                continue
+
+            for start in range(0, len(contents), 1000):
+                batch = contents[start : start + 1000]
+                self._s3_client.delete_objects(
+                    Bucket=self._bucket,
+                    Delete={
+                        "Objects": [{"Key": item["Key"]} for item in batch],
+                        "Quiet": True,
+                    },
+                )
+                deleted += len(batch)
+        return deleted
+
     def validate_bucket_access(self, *, smoke_test: bool = False) -> None:
         """Validate list access and optionally perform a write/delete smoke test."""
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import signal
 import threading
 from collections.abc import Mapping
@@ -1877,6 +1878,117 @@ def validate_runtime_requirements(
         raise ValueError(str(report["issues"][0]))
 
 
+def _reset_local_runtime_artifacts(paths: RuntimePaths) -> tuple[int, tuple[str, ...]]:
+    removed_paths: list[str] = []
+    removable_files = (
+        paths.audit_log_path,
+        paths.journal_log_path,
+        paths.artifacts_log_path,
+        paths.checkpoints_log_path,
+        paths.activity_log_path,
+        paths.summary_path,
+    )
+    for file_path in removable_files:
+        if file_path.exists():
+            file_path.unlink()
+            removed_paths.append(str(file_path))
+
+    if paths.raw_payload_dir.exists():
+        shutil.rmtree(paths.raw_payload_dir)
+        removed_paths.append(str(paths.raw_payload_dir))
+
+    return len(removed_paths), tuple(removed_paths)
+
+
+def _reset_postgres_runtime_tables(connection_factory: Any) -> None:
+    query = """
+    TRUNCATE TABLE
+        detected_events,
+        raw_events,
+        ingestion_runs
+    RESTART IDENTITY CASCADE
+    """
+    with connection_factory() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(query)
+        connection.commit()
+
+
+def reset_runtime_state(
+    *,
+    base_dir: str | Path = ROOT_DIR,
+    env: Mapping[str, str] | None = None,
+    reset_postgres: bool = True,
+    reset_object_store: bool = True,
+    clear_runtime_env: bool = True,
+) -> dict[str, Any]:
+    resolved_env = _resolve_runtime_env(
+        base_dir=base_dir,
+        env=env,
+        trading_mode=str((env or {}).get("TRADING_MODE", "paper")),
+    )
+    paths = RuntimePaths.from_base_dir(base_dir)
+
+    local_artifacts_removed, local_removed_paths = _reset_local_runtime_artifacts(paths)
+
+    runtime_env_path = Path(base_dir) / ".runtime.env"
+    runtime_env_removed = False
+    if clear_runtime_env and runtime_env_path.exists():
+        runtime_env_path.unlink()
+        runtime_env_removed = True
+
+    issues: list[str] = []
+    postgres_reset = False
+    postgres_error = None
+    if reset_postgres:
+        connection_factory = postgres_connection_factory_from_env(resolved_env)
+        if connection_factory is None:
+            postgres_error = (
+                "Postgres storage is required to reset the runtime state. Set "
+                "POSTGRES_ENABLED=true and configure DATABASE_URL or POSTGRES_*."
+            )
+            issues.append(postgres_error)
+        else:
+            reachable, error = probe_postgres_connection(connection_factory)
+            if not reachable:
+                postgres_error = f"Unable to reset Postgres runtime state: {error}"
+                issues.append(postgres_error)
+            else:
+                _reset_postgres_runtime_tables(connection_factory)
+                postgres_reset = True
+
+    deleted_object_keys = 0
+    object_store_reset = False
+    object_store_error = None
+    if reset_object_store:
+        try:
+            config = ObjectStorageConfig.from_env(
+                env=resolved_env,
+                env_path=Path(base_dir) / ".env",
+            )
+            object_store = S3CompatibleObjectStore.from_config(config)
+            deleted_object_keys += object_store.delete_prefix(prefix="raw/")
+            deleted_object_keys += object_store.delete_prefix(prefix="healthcheck/")
+            object_store_reset = True
+        except Exception as exc:
+            object_store_error = f"Unable to reset object storage state: {exc}"
+            issues.append(object_store_error)
+
+    return {
+        "status": "reset" if not issues else "partial",
+        "base_dir": str(Path(base_dir)),
+        "local_artifacts_removed": local_artifacts_removed,
+        "local_removed_paths": list(local_removed_paths),
+        "runtime_env_removed": runtime_env_removed,
+        "postgres_reset": postgres_reset,
+        "postgres_error": postgres_error,
+        "object_store_reset": object_store_reset,
+        "object_store_deleted_keys": deleted_object_keys,
+        "object_store_error": object_store_error,
+        "issues": issues,
+    }
+
+
 def run_scheduler_service(
     app: TradingApplication,
     *,
@@ -2012,6 +2124,14 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         help="Validate Kraken and optional ERC-8004 configuration without running a cycle.",
     )
     parser.add_argument(
+        "--reset-storage",
+        action="store_true",
+        help=(
+            "Delete local runtime artifacts and clear the configured Postgres/R2 trading "
+            "state for a blank-slate restart."
+        ),
+    )
+    parser.add_argument(
         "--rss-interval-seconds",
         type=int,
         default=int(os.environ.get("RSS_INTERVAL_SECONDS", "120")),
@@ -2063,6 +2183,13 @@ def main() -> int:
             env=os.environ,
             trading_mode=resolved_trading_mode,
         )
+        if args.reset_storage:
+            report = reset_runtime_state(
+                base_dir=args.base_dir,
+                env=resolved_env,
+            )
+            print(json.dumps(report, indent=2, sort_keys=True))
+            return 0 if report["status"] == "reset" else 2
         if args.preflight:
             report = build_runtime_preflight(
                 trading_mode=resolved_trading_mode,
