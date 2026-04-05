@@ -7,6 +7,7 @@ import pytest
 from agent.portfolio import LocalPortfolioStateProvider
 from agent.risk import RiskCheckResult, RiskViolation
 from agent.signals import TradeIntent
+from detection.event_detection import DetectedEvent
 from detection.event_detection_postgres import PostgresEventDetectionRepository
 from execution.kraken_cli import CommandRunResult, KrakenCLIConfig
 from identity.erc8004_registry import SepoliaContractsConfig
@@ -219,6 +220,105 @@ def test_ingest_secondary_prices_merges_hourly_quotes_into_runtime_state(tmp_pat
     assert secondary_result is not None
     assert secondary_result.inserted_count == 1
     assert {quote.symbol_id for quote in app._latest_quotes} == {"btc_usd", "matic_usd"}
+
+
+def test_dynamic_tier_promotion_moves_secondary_symbol_into_core_polling(tmp_path: Path) -> None:
+    observed_pairs: list[str] = []
+
+    def fake_http_get(url: str, params: dict[str, str]) -> dict[str, object]:
+        assert url.endswith("/Ticker")
+        pair = params["pair"]
+        observed_pairs.append(pair)
+        if pair == BTC_SYMBOL.ticker:
+            return {
+                "error": [],
+                "result": {
+                    pair: {
+                        "c": ["68000.0", "1"],
+                        "o": "67900.0",
+                        "h": ["68200.0", "68200.0"],
+                        "l": ["67750.0", "67750.0"],
+                        "p": ["67850.0", "67850.0"],
+                    }
+                },
+            }
+        if pair == MATIC_SYMBOL.ticker:
+            return {
+                "error": [],
+                "result": {
+                    pair: {
+                        "c": ["1.08", "1"],
+                        "o": "1.00",
+                        "h": ["1.10", "1.10"],
+                        "l": ["0.99", "0.99"],
+                        "p": ["1.01", "1.01"],
+                        "v": ["2500", "1000"],
+                    }
+                },
+            }
+        raise AssertionError(f"Unexpected pair requested: {pair}")
+
+    app = build_local_demo_app(
+        base_dir=tmp_path,
+        symbols=[BTC_SYMBOL],
+        secondary_symbols=[MATIC_SYMBOL],
+        http_get=fake_http_get,
+        env={
+            "KRAKEN_API_KEY": "demo-key",
+            "KRAKEN_API_SECRET": "demo-secret",
+        },
+        **_storage_overrides(tmp_path),
+    )
+    promotion_time = datetime(2026, 4, 4, 12, 0, tzinfo=UTC)
+
+    promoted = app.refresh_dynamic_tier_promotions(
+        detected_events=[
+            DetectedEvent(
+                raw_event_id="evt-polygon",
+                event_type="PROTOCOL_UPGRADE",
+                rule_name="polygon_upgrade",
+                confidence=0.92,
+                matched_text="Polygon ecosystem upgrade drives strong developer activity.",
+                detected_at=promotion_time,
+            )
+        ],
+        price_quotes=[
+            PriceQuote(
+                symbol_id="btc_usd",
+                current=68_000.0,
+                open=67_900.0,
+                high=68_200.0,
+                low=67_750.0,
+                prev_close=67_850.0,
+                timestamp=1712232000,
+                asset_class="spot",
+            ),
+            PriceQuote(
+                symbol_id="matic_usd",
+                current=1.08,
+                open=1.00,
+                high=1.10,
+                low=0.99,
+                prev_close=1.01,
+                timestamp=1712232000,
+                asset_class="spot",
+                volatility_filter=1.9,
+                session_volume=2_500.0,
+                volume_ratio=2.5,
+            ),
+        ],
+        now=promotion_time,
+    )
+
+    assert promoted == ("matic_usd",)
+    status = app.dynamic_tier_status(now=promotion_time)
+    assert status["active_core_symbol_ids"] == ("btc_usd", "matic_usd")
+    assert status["promotions"]["matic_usd"]["expires_at"] == "2026-04-05T12:00:00+00:00"
+
+    observed_pairs.clear()
+    app.ingest_prices()
+
+    assert observed_pairs == [BTC_SYMBOL.ticker, MATIC_SYMBOL.ticker]
 
 
 def test_kraken_paper_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Path) -> None:

@@ -10,13 +10,13 @@ import signal
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
 from agent.portfolio import LocalPortfolioStateProvider, PortfolioSnapshot
 from agent.risk import RiskConfig
-from agent.signals import NoTradeDecision, TradeIntent
+from agent.signals import NoTradeDecision, TradeIntent, select_quote_for_event
 from agent.strategy import SimpleEventDrivenStrategy
 from detection.event_detection import DetectedEvent, RuleBasedEventDetector
 from detection.event_detection_postgres import (
@@ -114,6 +114,42 @@ class RuntimePaths:
             checkpoints_log_path=artifacts_dir / "validation_checkpoints.jsonl",
             activity_log_path=artifacts_dir / "activity_log.jsonl",
             summary_path=artifacts_dir / "run_summary.json",
+        )
+
+
+@dataclass(frozen=True)
+class TierPromotionConfig:
+    """Thresholds for temporarily promoting Tier B assets into the core poll loop."""
+
+    volume_ratio_threshold: float = 2.0
+    volatility_filter_threshold: float = 1.75
+    news_score_threshold: float = 0.85
+    correlation_break_threshold: float = 0.05
+    promotion_duration_hours: int = 24
+
+    @property
+    def promotion_duration(self) -> timedelta:
+        return timedelta(hours=max(self.promotion_duration_hours, 1))
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> TierPromotionConfig:
+        resolved_env = dict(env or {})
+        return cls(
+            volume_ratio_threshold=float(
+                resolved_env.get("TIER_PROMOTION_VOLUME_RATIO_THRESHOLD", "2.0")
+            ),
+            volatility_filter_threshold=float(
+                resolved_env.get("TIER_PROMOTION_VOLATILITY_THRESHOLD", "1.75")
+            ),
+            news_score_threshold=float(
+                resolved_env.get("TIER_PROMOTION_NEWS_SCORE_THRESHOLD", "0.85")
+            ),
+            correlation_break_threshold=float(
+                resolved_env.get("TIER_PROMOTION_CORRELATION_BREAK_THRESHOLD", "0.05")
+            ),
+            promotion_duration_hours=int(
+                resolved_env.get("TIER_PROMOTION_DURATION_HOURS", "24")
+            ),
         )
 
 
@@ -709,6 +745,7 @@ class TradingApplication:
         feed_groups: dict[str, list[FeedSource]],
         symbols: list[PriceSymbol],
         secondary_symbols: list[PriceSymbol] | None = None,
+        tier_promotion_config: TierPromotionConfig | None = None,
         parse_feed: Any | None = None,
         http_get: Any | None = None,
         scheduler: InfoScheduler | None = None,
@@ -771,20 +808,17 @@ class TradingApplication:
             feed_groups=feed_groups,
             parse_feed=parse_feed,
         )
-        self._prices_service = PricesIngestionService(
-            symbols=symbols,
-            http_get=http_get,
-            enrich_volatility_metrics=True,
+        self._base_price_symbols = list(symbols)
+        self._secondary_symbols = list(secondary_symbols or [])
+        self._secondary_symbol_map = {
+            symbol.symbol_id: symbol for symbol in self._secondary_symbols
+        }
+        self._price_http_get = http_get
+        self._tier_promotion_config = (
+            tier_promotion_config or TierPromotionConfig.from_env(resolved_runtime_env)
         )
-        self._secondary_prices_service = (
-            PricesIngestionService(
-                symbols=secondary_symbols,
-                http_get=http_get,
-                enrich_volatility_metrics=True,
-            )
-            if secondary_symbols
-            else None
-        )
+        self._promoted_secondary_symbols: dict[str, dict[str, Any]] = {}
+        self._sync_price_services()
         self._detection_service = EventDetectionService(
             detector=RuleBasedEventDetector(),
             raw_events_repository=self._raw_events_repository,
@@ -883,6 +917,7 @@ class TradingApplication:
         live_connected_paper = (
             config.live_enabled and not config.dry_run and config.validate_only
         )
+        tier_status = self.dynamic_tier_status()
         return {
             "trading_mode": self._trading_mode,
             "identity_layer": self._identity_layer,
@@ -906,6 +941,250 @@ class TradingApplication:
                 "max_positions": self._risk_config.max_concurrent_positions,
                 "max_per_asset": self._risk_config.max_positions_per_asset,
             },
+            "core_universe_size": len(tier_status["active_core_symbol_ids"]),
+            "secondary_universe_size": len(tier_status["secondary_symbol_ids"]),
+            "dynamic_tier_status": tier_status,
+        }
+
+    def _build_prices_service(self, *, symbols: list[PriceSymbol]) -> PricesIngestionService:
+        return PricesIngestionService(
+            symbols=symbols,
+            http_get=self._price_http_get,
+            enrich_volatility_metrics=True,
+        )
+
+    def _active_core_symbols(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> list[PriceSymbol]:
+        self._prune_expired_tier_promotions(now=now)
+        promoted_ids = set(self._promoted_secondary_symbols)
+        promoted_symbols = [
+            symbol for symbol in self._secondary_symbols if symbol.symbol_id in promoted_ids
+        ]
+        return [*self._base_price_symbols, *promoted_symbols]
+
+    def _available_secondary_symbols(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> list[PriceSymbol]:
+        self._prune_expired_tier_promotions(now=now)
+        promoted_ids = set(self._promoted_secondary_symbols)
+        return [
+            symbol
+            for symbol in self._secondary_symbols
+            if symbol.symbol_id not in promoted_ids
+        ]
+
+    def _sync_price_services(self, *, now: datetime | None = None) -> None:
+        active_core_symbols = self._active_core_symbols(now=now)
+        available_secondary_symbols = self._available_secondary_symbols(now=now)
+        self._prices_service = self._build_prices_service(symbols=active_core_symbols)
+        self._secondary_prices_service = (
+            self._build_prices_service(symbols=available_secondary_symbols)
+            if available_secondary_symbols
+            else None
+        )
+
+    def _prune_expired_tier_promotions(self, *, now: datetime | None = None) -> bool:
+        checked_at = now or datetime.now(UTC)
+        expired_symbol_ids = [
+            symbol_id
+            for symbol_id, details in self._promoted_secondary_symbols.items()
+            if cast(datetime, details["expires_at"]) <= checked_at
+        ]
+        for symbol_id in expired_symbol_ids:
+            del self._promoted_secondary_symbols[symbol_id]
+        return bool(expired_symbol_ids)
+
+    @staticmethod
+    def _price_return_fraction(quote: PriceQuote | None) -> float:
+        if quote is None or quote.open <= 0:
+            return 0.0
+        return (quote.current - quote.open) / quote.open
+
+    def _correlation_break_score(
+        self,
+        *,
+        quote: PriceQuote,
+        benchmark_quote: PriceQuote | None,
+    ) -> float:
+        benchmark_return = self._price_return_fraction(benchmark_quote)
+        symbol_return = self._price_return_fraction(quote)
+        divergence = abs(symbol_return - benchmark_return)
+        if symbol_return * benchmark_return < 0:
+            divergence += 0.02
+        return round(max(divergence, 0.0), 4)
+
+    def _promotion_lookup_quotes(
+        self,
+        price_quotes: list[PriceQuote] | None = None,
+    ) -> list[PriceQuote]:
+        quote_lookup = {
+            quote.symbol_id: quote for quote in (price_quotes or self._latest_quotes)
+        }
+        for symbol in [*self._base_price_symbols, *self._secondary_symbols]:
+            if symbol.symbol_id not in quote_lookup:
+                quote_lookup[symbol.symbol_id] = PriceQuote(
+                    symbol_id=symbol.symbol_id,
+                    current=0.0,
+                    open=0.0,
+                    high=0.0,
+                    low=0.0,
+                    prev_close=0.0,
+                    timestamp=0,
+                    asset_class=symbol.asset_class,
+                )
+        return list(quote_lookup.values())
+
+    def _news_scores_by_symbol(
+        self,
+        detected_events: list[DetectedEvent] | tuple[DetectedEvent, ...],
+        *,
+        price_quotes: list[PriceQuote] | None = None,
+    ) -> dict[str, float]:
+        if not detected_events:
+            return {}
+
+        lookup_quotes = self._promotion_lookup_quotes(price_quotes)
+        cumulative_scores: dict[str, float] = {}
+        event_counts: dict[str, int] = {}
+
+        for event in detected_events:
+            quote = select_quote_for_event(event=event, price_quotes=lookup_quotes)
+            if quote is None or quote.symbol_id not in self._secondary_symbol_map:
+                continue
+            novelty = event.novelty_score if event.novelty_score is not None else 1.0
+            bounded_novelty = min(max(novelty, 0.0), 1.0)
+            weighted_confidence = max(event.confidence, 0.0) * (0.7 + (0.3 * bounded_novelty))
+            cumulative_scores[quote.symbol_id] = (
+                cumulative_scores.get(quote.symbol_id, 0.0) + weighted_confidence
+            )
+            event_counts[quote.symbol_id] = event_counts.get(quote.symbol_id, 0) + 1
+
+        return {
+            symbol_id: round(
+                min(
+                    1.5,
+                    (score / max(event_counts[symbol_id], 1))
+                    + (0.15 * max(event_counts[symbol_id] - 1, 0)),
+                ),
+                4,
+            )
+            for symbol_id, score in cumulative_scores.items()
+        }
+
+    def refresh_dynamic_tier_promotions(
+        self,
+        *,
+        detected_events: list[DetectedEvent] | tuple[DetectedEvent, ...] | None = None,
+        price_quotes: list[PriceQuote] | None = None,
+        now: datetime | None = None,
+    ) -> tuple[str, ...]:
+        checked_at = now or datetime.now(UTC)
+        did_prune = self._prune_expired_tier_promotions(now=checked_at)
+        actual_quotes = list(price_quotes or self._latest_quotes)
+        if actual_quotes:
+            self._latest_quotes = self._merge_quotes(self._latest_quotes, actual_quotes)
+        lookup_quotes = self._promotion_lookup_quotes(actual_quotes)
+        quote_by_symbol = {quote.symbol_id: quote for quote in lookup_quotes}
+        benchmark_quote = quote_by_symbol.get("btc_usd") or quote_by_symbol.get("eth_usd")
+        news_scores = self._news_scores_by_symbol(
+            detected_events or (),
+            price_quotes=lookup_quotes,
+        )
+        newly_promoted: list[str] = []
+
+        for symbol in self._secondary_symbols:
+            quote = quote_by_symbol.get(symbol.symbol_id)
+            if quote is None:
+                continue
+
+            volume_ratio = quote.volume_ratio or 0.0
+            volatility_filter = quote.volatility_filter or 0.0
+            news_score = news_scores.get(symbol.symbol_id, 0.0)
+            correlation_break = self._correlation_break_score(
+                quote=quote,
+                benchmark_quote=benchmark_quote,
+            )
+            reasons: list[str] = []
+
+            if volume_ratio >= self._tier_promotion_config.volume_ratio_threshold:
+                reasons.append(f"volume_spike:{volume_ratio:.2f}x")
+            if (
+                volatility_filter
+                >= self._tier_promotion_config.volatility_filter_threshold
+            ):
+                reasons.append(f"volatility_spike:{volatility_filter:.2f}")
+            if news_score >= self._tier_promotion_config.news_score_threshold:
+                reasons.append(f"news_spike:{news_score:.2f}")
+            if (
+                correlation_break
+                >= self._tier_promotion_config.correlation_break_threshold
+            ):
+                reasons.append(f"correlation_break:{correlation_break:.4f}")
+
+            if not reasons:
+                continue
+
+            existing = self._promoted_secondary_symbols.get(symbol.symbol_id)
+            if existing is None:
+                newly_promoted.append(symbol.symbol_id)
+            self._promoted_secondary_symbols[symbol.symbol_id] = {
+                "symbol_id": symbol.symbol_id,
+                "promoted_at": (
+                    cast(datetime, existing["promoted_at"])
+                    if existing is not None
+                    else checked_at
+                ),
+                "expires_at": checked_at + self._tier_promotion_config.promotion_duration,
+                "reasons": tuple(reasons),
+                "metrics": {
+                    "volume_ratio": round(volume_ratio, 4),
+                    "volatility_filter": round(volatility_filter, 4),
+                    "news_score": round(news_score, 4),
+                    "correlation_break": round(correlation_break, 4),
+                },
+            }
+
+        if newly_promoted or did_prune:
+            self._sync_price_services(now=checked_at)
+
+        return tuple(sorted(newly_promoted))
+
+    def dynamic_tier_status(self, *, now: datetime | None = None) -> dict[str, Any]:
+        checked_at = now or datetime.now(UTC)
+        if self._prune_expired_tier_promotions(now=checked_at):
+            self._sync_price_services(now=checked_at)
+
+        promotions: dict[str, Any] = {}
+        for symbol_id, details in sorted(self._promoted_secondary_symbols.items()):
+            promotions[symbol_id] = {
+                "promoted_at": cast(datetime, details["promoted_at"]).isoformat(),
+                "expires_at": cast(datetime, details["expires_at"]).isoformat(),
+                "reasons": list(cast(tuple[str, ...], details["reasons"])),
+                "metrics": dict(cast(dict[str, float], details["metrics"])),
+            }
+
+        return {
+            "enabled": bool(self._secondary_symbols),
+            "promotion_window_hours": self._tier_promotion_config.promotion_duration_hours,
+            "thresholds": {
+                "volume_ratio": self._tier_promotion_config.volume_ratio_threshold,
+                "volatility_filter": self._tier_promotion_config.volatility_filter_threshold,
+                "news_score": self._tier_promotion_config.news_score_threshold,
+                "correlation_break": self._tier_promotion_config.correlation_break_threshold,
+            },
+            "active_core_symbol_ids": tuple(
+                symbol.symbol_id for symbol in self._active_core_symbols(now=checked_at)
+            ),
+            "secondary_symbol_ids": tuple(
+                symbol.symbol_id
+                for symbol in self._available_secondary_symbols(now=checked_at)
+            ),
+            "promotions": promotions,
         }
 
     def _initialize_identity(self, registry: IdentityRegistry) -> AgentIdentity:
@@ -1300,7 +1579,9 @@ class TradingApplication:
     def ingest_secondary_prices(self) -> IngestionRunResult | None:
         if self._secondary_prices_service is None:
             return None
-        return self._ingest_quotes_with_service(self._secondary_prices_service)
+        result = self._ingest_quotes_with_service(self._secondary_prices_service)
+        self.refresh_dynamic_tier_promotions(price_quotes=list(self._latest_quotes))
+        return result
 
     def classify_events(self) -> int:
         return self._detection_service.classify_pending_events(
@@ -1327,6 +1608,10 @@ class TradingApplication:
     ) -> RuntimeCycleResult:
         current_portfolio = self._portfolio_provider.get_portfolio_snapshot()
         detected_events = self._new_detected_events()
+        promoted_symbols = self.refresh_dynamic_tier_promotions(
+            detected_events=list(detected_events),
+            price_quotes=list(self._latest_quotes),
+        )
         self._artifact_ledger.start_cycle(
             rss_result=rss_result,
             prices_result=prices_result,
@@ -1341,6 +1626,18 @@ class TradingApplication:
                 details={
                     "count": len(detected_events),
                     "event_types": sorted({event.event_type for event in detected_events}),
+                },
+            )
+        if promoted_symbols:
+            self._artifact_ledger.record_action(
+                action="tier_promotions_updated",
+                status="active",
+                affects=("prices_ingestion", "strategy"),
+                details={
+                    "symbols": list(promoted_symbols),
+                    "promotion_window_hours": (
+                        self._tier_promotion_config.promotion_duration_hours
+                    ),
                 },
             )
 
@@ -2013,6 +2310,7 @@ def build_local_demo_app(
     feed_groups: dict[str, list[FeedSource]] | None = None,
     symbols: list[PriceSymbol] | None = None,
     secondary_symbols: list[PriceSymbol] | None = None,
+    tier_promotion_config: TierPromotionConfig | None = None,
     parse_feed: Any | None = None,
     http_get: Any | None = None,
     trading_mode: str = "paper",
@@ -2053,11 +2351,15 @@ def build_local_demo_app(
         if symbols is None
         else None
     )
+    resolved_tier_promotion_config = (
+        tier_promotion_config or TierPromotionConfig.from_env(runtime_env)
+    )
     return TradingApplication(
         paths=paths,
         feed_groups=feed_groups or RSS_FEED_GROUPS,
         symbols=resolved_symbols,
         secondary_symbols=resolved_secondary_symbols,
+        tier_promotion_config=resolved_tier_promotion_config,
         parse_feed=parse_feed,
         http_get=http_get,
         identity_registry=build_identity_registry(
