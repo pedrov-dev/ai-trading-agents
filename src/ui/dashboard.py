@@ -145,6 +145,8 @@ def build_position_rows(payload: Mapping[str, Any] | None) -> list[dict[str, Any
                 "quantity": _as_float(details.get("quantity")),
                 "entry_price": _as_float(details.get("entry_price")),
                 "current_price": _as_float(details.get("current_price")),
+                "signal_id": str(details.get("source_signal_id") or ""),
+                "exit_horizon": str(details.get("exit_horizon_label") or ""),
                 "market_value_usd": _as_float(details.get("market_value_usd")),
                 "unrealized_pnl_usd": _as_float(details.get("unrealized_pnl_usd")),
                 "unrealized_return_pct": round(
@@ -197,6 +199,8 @@ def build_trade_intent_rows(payload: Mapping[str, Any] | None) -> list[dict[str,
                 "symbol_id": str(item.get("symbol_id") or "-"),
                 "side": str(item.get("side") or "-"),
                 "score": _as_float(item.get("score")),
+                "signal_id": str(item.get("signal_id") or ""),
+                "exit_horizon": str(item.get("exit_horizon_label") or ""),
                 "notional_usd": _as_float(item.get("notional_usd")),
                 "quantity": _as_float(item.get("quantity")),
                 "generated_at": str(item.get("generated_at") or ""),
@@ -236,6 +240,10 @@ def build_execution_rows(payload: Mapping[str, Any] | None) -> list[dict[str, An
                 ),
                 "side": str(request.get("side") or item.get("side") or "-"),
                 "status": str(item.get("status") or "unknown"),
+                "signal_id": str(request.get("signal_id") or item.get("signal_id") or ""),
+                "exit_horizon": str(
+                    request.get("exit_horizon_label") or item.get("exit_horizon_label") or ""
+                ),
                 "filled_quantity": _as_float(
                     fill.get("filled_quantity") or item.get("filled_quantity")
                 ),
@@ -249,6 +257,42 @@ def build_execution_rows(payload: Mapping[str, Any] | None) -> list[dict[str, An
             }
         )
     return rows
+
+
+def build_signal_discovery_rows(payload: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Flatten per-horizon outcome stats into a concise discovery table."""
+    if payload is None:
+        return []
+    signal_discovery = payload.get("signal_discovery")
+    if not isinstance(signal_discovery, Mapping):
+        return []
+    by_horizon = signal_discovery.get("by_horizon")
+    if not isinstance(by_horizon, Mapping):
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for horizon, details in by_horizon.items():
+        if not isinstance(details, Mapping):
+            continue
+        rows.append(
+            {
+                "horizon": str(horizon),
+                "sample_count": int(_as_float(details.get("sample_count"))),
+                "win_rate_pct": round(_as_float(details.get("win_rate")) * 100, 2),
+                "avg_realized_pnl_usd": _as_float(details.get("avg_realized_pnl_usd")),
+                "avg_return_pct": round(_as_float(details.get("avg_return_fraction")) * 100, 2),
+                "event_types": ", ".join(
+                    sorted(
+                        str(key)
+                        for key in cast(
+                            Mapping[str, Any],
+                            details.get("event_types", {}),
+                        ).keys()
+                    )
+                ),
+            }
+        )
+    return sorted(rows, key=lambda row: row["sample_count"], reverse=True)
 
 
 def build_activity_rows(activity_records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -425,6 +469,7 @@ def render_dashboard() -> None:
     position_rows = build_position_rows(latest_payload)
     trade_intent_rows = build_trade_intent_rows(latest_payload)
     execution_rows = build_execution_rows(latest_payload)
+    signal_discovery_rows = build_signal_discovery_rows(latest_payload)
 
     _render_kpis(streamlit, latest_payload)
 
@@ -456,6 +501,12 @@ def render_dashboard() -> None:
             streamlit.dataframe(trade_intent_rows, width='stretch')
         else:
             streamlit.write("No trade intents available yet.")
+
+        streamlit.subheader("Signal discovery by horizon")
+        if signal_discovery_rows:
+            streamlit.dataframe(signal_discovery_rows, width='stretch')
+        else:
+            streamlit.write("No closed horizon outcomes recorded yet.")
 
     with right_column:
         streamlit.subheader("Execution results")

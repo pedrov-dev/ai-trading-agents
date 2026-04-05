@@ -37,7 +37,6 @@ _PREFERRED_SYMBOLS: tuple[str, ...] = ("btc_usd", "eth_usd", "sol_usd", "xrp_usd
 class Signal:
     """Scored trading opportunity derived from a detected event and price quote."""
 
-    signal_id: str
     raw_event_id: str
     event_type: str
     symbol_id: str
@@ -47,6 +46,7 @@ class Signal:
     current_price: float
     generated_at: datetime
     rationale: tuple[str, ...]
+    signal_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +159,13 @@ def build_trade_intent(
     rationale = signal.rationale + rationale_suffix + (
         f"Target notional set to ${notional_usd:,.2f}.",
     )
+    resolved_signal_id = signal.signal_id or _build_signal_id(
+        raw_event_id=signal.raw_event_id,
+        event_type=signal.event_type,
+        symbol_id=signal.symbol_id,
+        generated_at=signal.generated_at,
+    )
+
     return TradeIntent(
         symbol_id=signal.symbol_id,
         side=signal.side,
@@ -168,7 +175,7 @@ def build_trade_intent(
         score=signal.score,
         rationale=rationale,
         generated_at=signal.generated_at,
-        signal_id=signal.signal_id,
+        signal_id=resolved_signal_id,
         raw_event_id=signal.raw_event_id,
         event_type=signal.event_type,
         exit_horizon_label=exit_horizon_label,
@@ -192,8 +199,6 @@ def _build_signal_id(
     generated_at: datetime,
 ) -> str:
     digest = hashlib.sha256(
-        f"{raw_event_id}|{event_type}|{symbol_id}|{generated_at.isoformat()}".encode(
-            "utf-8"
-        )
+        f"{raw_event_id}|{event_type}|{symbol_id}|{generated_at.isoformat()}".encode()
     ).hexdigest()[:12]
     return f"signal-{digest}"

@@ -46,6 +46,9 @@ class PortfolioSnapshot:
     def open_position_count(self) -> int:
         return len(self.positions)
 
+    def open_symbol_count(self) -> int:
+        return len({position.symbol_id for position in self.positions})
+
     def has_open_position(self, symbol_id: str) -> bool:
         return any(position.symbol_id == symbol_id for position in self.positions)
 
@@ -58,7 +61,12 @@ class PortfolioSnapshot:
                 return position
         return None
 
-    def position_for_symbol(self, symbol_id: str, *, position_id: str | None = None) -> Position | None:
+    def position_for_symbol(
+        self,
+        symbol_id: str,
+        *,
+        position_id: str | None = None,
+    ) -> Position | None:
         if position_id is not None:
             position = self.position_for_id(position_id)
             if position is not None:

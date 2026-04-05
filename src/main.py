@@ -1284,7 +1284,9 @@ class TradingApplication:
                 "cash_usd": round(portfolio.cash_usd, 2),
                 "open_position_count": portfolio.open_position_count(),
                 "realized_pnl_today": round(portfolio.realized_pnl_today, 2),
-                "signal_outcome_count": _build_signal_discovery_summary(artifacts)["total_outcomes"],
+                "signal_outcome_count": _build_signal_discovery_summary(
+                    artifacts
+                )["total_outcomes"],
             },
             occurred_at=portfolio.as_of,
             summary_updates={

@@ -202,7 +202,11 @@ def build_pnl_snapshot(
             if price_quote is not None
             else {}
         )
-        position_key = position.position_id or position.symbol_id
+        position_key = (
+            position.symbol_id
+            if position.symbol_id not in position_pnl
+            else (position.position_id or f"{position.symbol_id}:{len(position_pnl)}")
+        )
         position_pnl[position_key] = PositionPnL(
             symbol_id=position.symbol_id,
             side=position.side,

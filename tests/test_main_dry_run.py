@@ -235,17 +235,20 @@ def test_kraken_paper_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Pa
     assert result.prices_result.inserted_count == 1
     assert result.classification_count >= 1
     assert len(result.detected_events) >= 1
-    assert len(result.trade_intents) == 1
-    assert len(result.execution_results) == 1
-    assert result.execution_results[0].status.value == "validated"
-    assert len(calls) == 1
-    assert "--validate" in calls[0]
+    assert len(result.trade_intents) == 4
+    assert len(result.execution_results) == 4
+    assert all(item.status.value == "validated" for item in result.execution_results)
+    assert len(calls) == 4
+    assert all("--validate" in call for call in calls)
     assert result.artifact_count >= 4
     assert result.checkpoint_count >= 4
     assert result.audit_summary.total_events >= 2
     assert result.execution_results[0].fill is not None
-    assert result.portfolio.open_position_count() == 1
-    assert result.portfolio.positions[0].symbol_id == "btc_usd"
+    assert result.portfolio.open_position_count() == 4
+    assert {position.symbol_id for position in result.portfolio.positions} == {"btc_usd"}
+    assert {
+        position.exit_horizon_label for position in result.portfolio.positions
+    } == {"5m", "30m", "4h", "24h"}
 
     assert (tmp_path / "artifacts" / "orders_audit.jsonl").exists()
     assert (tmp_path / "artifacts" / "trading_journal.jsonl").exists()
@@ -506,9 +509,12 @@ def test_local_demo_app_restores_portfolio_from_trade_journal(tmp_path: Path) ->
 
     restored_portfolio = restored_app._portfolio_provider.get_portfolio_snapshot()
 
-    assert first_result.portfolio.open_position_count() == 1
-    assert restored_portfolio.open_position_count() == 1
-    assert restored_portfolio.positions[0].symbol_id == "btc_usd"
+    assert first_result.portfolio.open_position_count() == 4
+    assert restored_portfolio.open_position_count() == 4
+    assert {position.symbol_id for position in restored_portfolio.positions} == {"btc_usd"}
+    assert {
+        position.exit_horizon_label for position in restored_portfolio.positions
+    } == {"5m", "30m", "4h", "24h"}
     assert restored_portfolio.cash_usd == first_result.portfolio.cash_usd
     assert restored_portfolio.total_equity == first_result.portfolio.total_equity
 

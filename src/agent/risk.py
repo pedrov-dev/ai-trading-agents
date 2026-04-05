@@ -100,11 +100,11 @@ class RiskManager:
                     )
                 )
 
-            if portfolio.open_position_count() >= self._config.max_concurrent_positions:
+            if portfolio.open_symbol_count() >= self._config.max_concurrent_positions:
                 violations.append(
                     RiskViolation(
                         code="max_concurrent_positions",
-                        message="Maximum concurrent positions already open.",
+                        message="Maximum concurrent symbols already open.",
                     )
                 )
 

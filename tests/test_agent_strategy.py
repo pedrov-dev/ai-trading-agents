@@ -39,10 +39,11 @@ def test_strategy_generates_trade_intent_for_high_confidence_event() -> None:
         portfolio=portfolio,
     )
 
-    assert len(intents) == 1
-    assert intents[0].side == "buy"
-    assert intents[0].notional_usd > 0
-    assert any("ETF_APPROVAL" in reason for reason in intents[0].rationale)
+    assert len(intents) == 4
+    assert all(intent.side == "buy" for intent in intents)
+    assert sum(intent.notional_usd for intent in intents) > 0
+    assert [intent.exit_horizon_label for intent in intents] == ["5m", "30m", "4h", "24h"]
+    assert all(any("ETF_APPROVAL" in reason for reason in intent.rationale) for intent in intents)
 
 
 def test_strategy_splits_high_confidence_event_into_multiple_exit_horizons() -> None:

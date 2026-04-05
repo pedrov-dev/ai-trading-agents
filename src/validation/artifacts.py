@@ -236,7 +236,11 @@ class ValidationArtifact:
                     if result.request.exit_horizon_label
                     else {}
                 ),
-                **({"position_id": result.request.position_id} if result.request.position_id else {}),
+                **(
+                    {"position_id": result.request.position_id}
+                    if result.request.position_id
+                    else {}
+                ),
             },
             created_at=result.completed_at,
         )
@@ -276,6 +280,8 @@ class ValidationArtifact:
                 else (entry_price - fill.average_price) / entry_price
             )
         elapsed_minutes = max((fill.filled_at - opened_at).total_seconds() / 60.0, 0.0)
+        realized_pnl_value = round(realized_pnl_usd, 2)
+        realized_return_value = round(realized_return_fraction, 6)
         payload = {
             "symbol_id": resolved_symbol,
             "side": resolved_side,
@@ -284,8 +290,8 @@ class ValidationArtifact:
             "opened_at": opened_at.isoformat(),
             "closed_at": fill.filled_at.isoformat(),
             "elapsed_minutes": round(elapsed_minutes, 2),
-            "realized_pnl_usd": round(realized_pnl_usd, 2),
-            "realized_return_fraction": round(realized_return_fraction, 6),
+            "realized_pnl_usd": realized_pnl_value,
+            "realized_return_fraction": realized_return_value,
             "exit_horizon_label": resolved_horizon,
             "signal_id": resolved_signal_id,
             "raw_event_id": resolved_raw_event_id,
@@ -296,15 +302,15 @@ class ValidationArtifact:
         evidence = (
             ArtifactEvidence(
                 name="realized_pnl_usd",
-                value=round(realized_pnl_usd, 2),
+                value=realized_pnl_value,
                 unit="usd",
-                passed=realized_pnl_usd >= 0,
+                passed=realized_pnl_value >= 0,
             ),
             ArtifactEvidence(
                 name="realized_return_fraction",
-                value=round(realized_return_fraction, 6),
+                value=realized_return_value,
                 unit="fraction",
-                passed=realized_return_fraction >= 0,
+                passed=realized_return_value >= 0,
             ),
             ArtifactEvidence(
                 name="elapsed_minutes",
@@ -327,7 +333,7 @@ class ValidationArtifact:
             kind=ArtifactKind.SIGNAL_OUTCOME,
             status=(
                 ArtifactStatus.PASSED
-                if payload["realized_return_fraction"] >= 0
+                if realized_return_value >= 0
                 else ArtifactStatus.FAILED
             ),
             subject_id=subject_id,
