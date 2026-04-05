@@ -12,6 +12,8 @@ __pycache__/
 .env
 .venv/
 venv/
+.env.secrets
+.env.params
 
 # Coverage and build
 .coverage
