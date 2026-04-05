@@ -39,6 +39,8 @@ _SYMBOL_TO_KRAKEN_PAIR: dict[str, str] = {
     "eth_usd": "ETH/USD",
     "sol_usd": "SOL/USD",
     "xrp_usd": "XRP/USD",
+    # Polygon's Kraken spot market is now exposed under the POL ticker.
+    "matic_usd": "POL/USD",
 }
 _DEFAULT_KRAKEN_API_URL = "https://api.kraken.com"
 

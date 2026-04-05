@@ -2536,6 +2536,9 @@ def _storage_overrides_provided(
 def _local_storage_requested(env: Mapping[str, str] | None) -> bool:
     env_map = env if env is not None else {}
     storage_backend = str(env_map.get("STORAGE_BACKEND", "")).strip().lower()
+    postgres_enabled = str(env_map.get("POSTGRES_ENABLED", "")).strip().lower()
+    if storage_backend == "postgres" or postgres_enabled in {"1", "true", "yes", "on"}:
+        return False
     return storage_backend in {"local", "file", "memory"}
 
 
@@ -2710,10 +2713,13 @@ def build_runtime_preflight(
     )
 
     paths = RuntimePaths.from_base_dir(base_dir)
+    execution_config = KrakenCLIConfig.from_env(env_map)
+    local_storage_mode = _local_storage_requested(env_map)
     issues: list[str] = []
     try:
         paths.artifacts_dir.mkdir(parents=True, exist_ok=True)
-        paths.raw_payload_dir.mkdir(parents=True, exist_ok=True)
+        if local_storage_mode:
+            paths.raw_payload_dir.mkdir(parents=True, exist_ok=True)
         probe_path = paths.artifacts_dir / ".write_probe"
         probe_path.write_text("ok", encoding="utf-8")
         probe_path.unlink(missing_ok=True)
@@ -2721,9 +2727,6 @@ def build_runtime_preflight(
     except OSError:
         artifacts_writable = False
         issues.append(f"Artifacts directory is not writable: {paths.artifacts_dir}")
-
-    execution_config = KrakenCLIConfig.from_env(env_map)
-    local_storage_mode = _local_storage_requested(env_map)
     kraken_credentials_present = bool(str(env_map.get("KRAKEN_API_KEY", "")).strip()) and bool(
         str(env_map.get("KRAKEN_API_SECRET", "")).strip()
     )

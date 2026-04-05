@@ -51,7 +51,9 @@ TIER_A_PRICE_SYMBOLS: list[PriceSymbol] = [
 
 # Tier B: narrative-driven names for hourly or event-triggered fetches.
 TIER_B_PRICE_SYMBOLS: list[PriceSymbol] = [
-    _spot(symbol_id="matic_usd", ticker="MATICUSD", base_asset="MATIC"),
+    # Keep the historical `matic_usd` symbol id for strategy/news compatibility,
+    # while using Kraken's current POL market ticker underneath.
+    _spot(symbol_id="matic_usd", ticker="POLUSD", base_asset="MATIC"),
     _spot(symbol_id="dot_usd", ticker="DOTUSD", base_asset="DOT"),
     _spot(symbol_id="ltc_usd", ticker="LTCUSD", base_asset="LTC"),
     _spot(symbol_id="bch_usd", ticker="BCHUSD", base_asset="BCH"),

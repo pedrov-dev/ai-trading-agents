@@ -1157,6 +1157,30 @@ def test_build_runtime_preflight_reads_split_env_files(tmp_path: Path) -> None:
     assert report["checks"]["object_store_configured"] is True
 
 
+def test_build_runtime_preflight_prefers_postgres_when_enabled(tmp_path: Path) -> None:
+    report = build_runtime_preflight(
+        trading_mode="paper",
+        identity_layer="none",
+        base_dir=tmp_path,
+        env={
+            "STORAGE_BACKEND": "local",
+            "POSTGRES_ENABLED": "true",
+            "DATABASE_URL": "postgresql://demo:demo@localhost:5432/ai_trading",
+            "CF_R2_BUCKET": "demo-bucket",
+            "CF_R2_ENDPOINT": "https://example.r2.cloudflarestorage.com",
+            "CF_R2_ACCESS_KEY": "demo-access",
+            "CF_R2_SECRET_KEY": "demo-secret-key",
+            "KRAKEN_API_KEY": "demo-key",
+            "KRAKEN_API_SECRET": "demo-secret",
+        },
+    )
+
+    assert report["checks"]["postgres_configured"] is True
+    assert report["execution_config"]["storage_backend"] == "postgres"
+    assert report["execution_config"]["object_store_backend"] == "r2"
+    assert not (tmp_path / "artifacts" / "raw_payloads").exists()
+
+
 def test_build_runtime_preflight_allows_local_storage_and_offline_dry_run(
     tmp_path: Path,
 ) -> None:

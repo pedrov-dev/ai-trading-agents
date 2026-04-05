@@ -35,6 +35,10 @@ def test_price_symbol_universe_covers_core_and_secondary_tiers() -> None:
         "apt_usd",
         "sui_usd",
     ]
+    polygon_symbol = next(
+        symbol for symbol in SECONDARY_PRICE_SYMBOLS if symbol.symbol_id == "matic_usd"
+    )
+    assert polygon_symbol.ticker == "POLUSD"
     assert len(ALL_PRICE_SYMBOLS) == len(PRICE_SYMBOLS) + len(SECONDARY_PRICE_SYMBOLS)
 
 

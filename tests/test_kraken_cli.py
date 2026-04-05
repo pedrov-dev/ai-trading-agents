@@ -9,6 +9,7 @@ from execution.kraken_cli import (
     KrakenCLIExecutor,
     _build_private_order_payload,
     _default_cli_executable,
+    _normalize_pair,
 )
 from execution.kraken_cli import (
     main as kraken_cli_main,
@@ -90,6 +91,10 @@ def test_build_command_translates_trade_intent_to_kraken_cli_args(tmp_path) -> N
     assert command[command.index("--side") + 1] == "buy"
     assert command[command.index("--volume") + 1] == "0.00367647"
     assert "--validate" in command
+
+
+def test_normalize_pair_maps_polygon_alias_to_supported_kraken_pair() -> None:
+    assert _normalize_pair("matic_usd") == "POL/USD"
 
 
 def test_submit_trade_intent_dry_run_records_request_and_simulated_fill(tmp_path) -> None:
