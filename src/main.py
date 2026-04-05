@@ -14,9 +14,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
+from agent.news_signal import select_quote_for_event
 from agent.portfolio import LocalPortfolioStateProvider, PortfolioSnapshot
 from agent.risk import RiskConfig
-from agent.signals import NoTradeDecision, TradeIntent, select_quote_for_event
+from agent.signals import NoTradeDecision, TradeIntent
 from agent.strategy import SimpleEventDrivenStrategy, StrategyConfig
 from detection.event_detection import DetectedEvent, RuleBasedEventDetector
 from detection.event_detection_postgres import (

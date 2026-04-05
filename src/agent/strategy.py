@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
+from agent.news_signal import infer_trade_side, select_quote_for_event
 from agent.portfolio import PortfolioSnapshot, Position
 from agent.risk import RiskCheckResult, RiskConfig, RiskManager
 from agent.signals import (
@@ -14,8 +15,6 @@ from agent.signals import (
     TradeIntent,
     build_signal,
     build_trade_intent,
-    infer_trade_side,
-    select_quote_for_event,
 )
 from detection.event_detection import DetectedEvent
 from detection.event_types import event_performance_group
