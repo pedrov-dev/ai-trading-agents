@@ -81,13 +81,17 @@ class ValidationArtifact:
             f"{intent.signal_id or 'signal'}:{intent.symbol_id}:{intent.side}:"
             f"{intent.exit_horizon_label or 'core'}:{intent.generated_at.isoformat()}"
         )
+        resolved_signal_id = intent.signal_family or intent.signal_id
         payload = {
             "symbol_id": intent.symbol_id,
             "side": intent.side,
+            "direction": intent.direction,
+            "asset": intent.asset,
             "notional_usd": round(intent.notional_usd, 2),
             "quantity": round(intent.quantity, 8),
             "current_price": intent.current_price,
             "score": intent.score,
+            "confidence": intent.confidence,
             "confidence_score": intent.confidence_score,
             "expected_move": intent.expected_move,
             "expected_move_fraction": intent.expected_move_fraction,
@@ -95,8 +99,9 @@ class ValidationArtifact:
             "risk_reward_ratio": intent.risk_reward_ratio,
             "rationale": list(intent.rationale),
             "generated_at": intent.generated_at.isoformat(),
-            "signal_id": intent.signal_id,
-            "raw_event_id": intent.raw_event_id,
+            "signal_id": resolved_signal_id,
+            "signal_version": intent.signal_version,
+            "heuristic_version": intent.heuristic_version,
             "event_type": intent.event_type,
             "exit_horizon_label": intent.exit_horizon_label,
             "max_hold_minutes": intent.max_hold_minutes,
@@ -104,10 +109,20 @@ class ValidationArtifact:
             "position_id": intent.position_id,
             "selection_rank": intent.selection_rank,
             "selection_composite_score": intent.selection_composite_score,
-            "heuristic_version": intent.heuristic_version,
             "rejected_alternatives": [
                 candidate.to_dict() for candidate in intent.rejected_alternatives
             ],
+            "audit_metadata": {
+                key: value
+                for key, value in {
+                    "signal_instance_id": intent.signal_id,
+                    "signal_family": intent.signal_family,
+                    "model_version": intent.model_version,
+                    "feature_set": intent.feature_set,
+                    "raw_event_id": intent.raw_event_id,
+                }.items()
+                if value is not None
+            },
         }
         evidence = (
             ArtifactEvidence(name="score", value=intent.score, unit="normalized"),
@@ -143,6 +158,8 @@ class ValidationArtifact:
             refs={
                 "symbol_id": intent.symbol_id,
                 **({"signal_id": intent.signal_id} if intent.signal_id else {}),
+                **({"signal_family": intent.signal_family} if intent.signal_family else {}),
+                **({"signal_version": intent.signal_version} if intent.signal_version else {}),
                 **({"raw_event_id": intent.raw_event_id} if intent.raw_event_id else {}),
                 **({"event_type": intent.event_type} if intent.event_type else {}),
                 **(
@@ -171,8 +188,12 @@ class ValidationArtifact:
             "symbol_id": decision.symbol_id,
             "event_type": decision.event_type,
             "event_group": decision.event_group,
-            "raw_event_id": decision.raw_event_id,
-            "signal_id": decision.signal_id,
+            "signal_id": decision.signal_family or decision.signal_id,
+            "signal_version": decision.signal_version,
+            "heuristic_version": None,
+            "asset": decision.asset,
+            "direction": decision.direction,
+            "confidence": decision.confidence,
             "reason_code": decision.reason_code,
             "reason": decision.reason,
             "confidence_score": decision.confidence_score,
@@ -180,6 +201,17 @@ class ValidationArtifact:
             "score": decision.score,
             "rationale": list(decision.rationale),
             "detected_at": decision.detected_at.isoformat(),
+            "audit_metadata": {
+                key: value
+                for key, value in {
+                    "signal_instance_id": decision.signal_id,
+                    "signal_family": decision.signal_family,
+                    "model_version": decision.model_version,
+                    "feature_set": decision.feature_set,
+                    "raw_event_id": decision.raw_event_id,
+                }.items()
+                if value is not None
+            },
         }
         evidence = (
             ArtifactEvidence(name="decision", value="no_trade", passed=True),
@@ -366,7 +398,8 @@ class ValidationArtifact:
         resolved_symbol = symbol_id or execution_result.request.symbol_id
         resolved_side = side or ("long" if execution_result.request.side == "buy" else "short")
         resolved_horizon = exit_horizon_label or execution_result.request.exit_horizon_label
-        resolved_signal_id = signal_id or execution_result.request.signal_id
+        resolved_signal_instance_id = signal_id or execution_result.request.signal_id
+        resolved_signal_id = execution_result.request.signal_family or resolved_signal_instance_id
         resolved_raw_event_id = raw_event_id or execution_result.request.raw_event_id
         resolved_event_type = event_type or execution_result.request.event_type
         realized_return_fraction = 0.0
@@ -391,10 +424,25 @@ class ValidationArtifact:
             "realized_return_fraction": realized_return_value,
             "exit_horizon_label": resolved_horizon,
             "signal_id": resolved_signal_id,
-            "raw_event_id": resolved_raw_event_id,
+            "signal_version": execution_result.request.signal_version,
+            "heuristic_version": execution_result.request.heuristic_version,
+            "asset": execution_result.request.asset,
+            "direction": execution_result.request.direction,
+            "confidence": execution_result.request.confidence,
             "event_type": resolved_event_type,
             "intent_id": execution_result.request.intent_id,
             "position_id": execution_result.request.position_id,
+            "audit_metadata": {
+                key: value
+                for key, value in {
+                    "signal_instance_id": resolved_signal_instance_id,
+                    "signal_family": execution_result.request.signal_family,
+                    "model_version": execution_result.request.model_version,
+                    "feature_set": execution_result.request.feature_set,
+                    "raw_event_id": resolved_raw_event_id,
+                }.items()
+                if value is not None
+            },
         }
         evidence = (
             ArtifactEvidence(
@@ -440,7 +488,21 @@ class ValidationArtifact:
             refs={
                 "symbol_id": resolved_symbol,
                 "intent_id": execution_result.request.intent_id,
-                **({"signal_id": resolved_signal_id} if resolved_signal_id else {}),
+                **(
+                    {"signal_id": resolved_signal_instance_id}
+                    if resolved_signal_instance_id
+                    else {}
+                ),
+                **(
+                    {"signal_family": execution_result.request.signal_family}
+                    if execution_result.request.signal_family
+                    else {}
+                ),
+                **(
+                    {"signal_version": execution_result.request.signal_version}
+                    if execution_result.request.signal_version
+                    else {}
+                ),
                 **({"raw_event_id": resolved_raw_event_id} if resolved_raw_event_id else {}),
                 **({"event_type": resolved_event_type} if resolved_event_type else {}),
                 **({"exit_horizon_label": resolved_horizon} if resolved_horizon else {}),

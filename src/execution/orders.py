@@ -45,6 +45,14 @@ class OrderRequest:
     rationale: tuple[str, ...]
     generated_at: datetime
     signal_id: str | None = None
+    signal_family: str | None = None
+    signal_version: str | None = None
+    model_version: str | None = None
+    feature_set: str | None = None
+    asset: str | None = None
+    direction: str | None = None
+    confidence: float | None = None
+    heuristic_version: str | None = None
     raw_event_id: str | None = None
     event_type: str | None = None
     event_group: str | None = None
@@ -91,6 +99,14 @@ class OrderRequest:
             rationale=intent.rationale,
             generated_at=intent.generated_at,
             signal_id=intent.signal_id,
+            signal_family=intent.signal_family,
+            signal_version=intent.signal_version,
+            model_version=intent.model_version,
+            feature_set=intent.feature_set,
+            asset=intent.asset,
+            direction=intent.direction,
+            confidence=intent.confidence,
+            heuristic_version=intent.heuristic_version,
             raw_event_id=intent.raw_event_id,
             event_type=intent.event_type,
             event_group=intent.event_group,
@@ -116,14 +132,29 @@ class OrderRequest:
             "score": self.score,
             "rationale": list(self.rationale),
             "generated_at": self.generated_at.isoformat(),
-            "signal_id": self.signal_id,
-            "raw_event_id": self.raw_event_id,
+            "signal_id": self.signal_family or self.signal_id,
+            "signal_version": self.signal_version,
+            "heuristic_version": self.heuristic_version,
+            "asset": self.asset,
+            "direction": self.direction,
+            "confidence": self.confidence,
             "event_type": self.event_type,
             "event_group": self.event_group,
             "exit_horizon_label": self.exit_horizon_label,
             "max_hold_minutes": self.max_hold_minutes,
             "exit_due_at": self.exit_due_at.isoformat() if self.exit_due_at else None,
             "position_id": self.position_id,
+            "audit_metadata": {
+                key: value
+                for key, value in {
+                    "signal_instance_id": self.signal_id,
+                    "signal_family": self.signal_family,
+                    "model_version": self.model_version,
+                    "feature_set": self.feature_set,
+                    "raw_event_id": self.raw_event_id,
+                }.items()
+                if value is not None
+            },
             "requested_at": self.requested_at.isoformat(),
             "execution_mode": self.execution_mode.value,
             "status": self.status.value,

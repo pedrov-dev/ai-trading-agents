@@ -242,21 +242,35 @@ class RuntimeCycleResult:
                     "notional_usd": intent.notional_usd,
                     "quantity": intent.quantity,
                     "score": intent.score,
+                    "confidence": intent.confidence,
                     "confidence_score": intent.confidence_score,
                     "expected_move": intent.expected_move,
                     "expected_move_fraction": intent.expected_move_fraction,
                     "stop_distance_fraction": intent.stop_distance_fraction,
                     "risk_reward_ratio": intent.risk_reward_ratio,
                     "generated_at": intent.generated_at.isoformat(),
-                    "signal_id": intent.signal_id,
-                    "raw_event_id": intent.raw_event_id,
+                    "signal_id": intent.signal_family or intent.signal_id,
+                    "signal_version": intent.signal_version,
+                    "heuristic_version": intent.heuristic_version,
+                    "asset": intent.asset,
+                    "direction": intent.direction,
                     "event_type": intent.event_type,
                     "event_group": intent.event_group,
                     "exit_horizon_label": intent.exit_horizon_label,
                     "position_id": intent.position_id,
                     "selection_rank": intent.selection_rank,
                     "selection_composite_score": intent.selection_composite_score,
-                    "heuristic_version": intent.heuristic_version,
+                    "audit_metadata": {
+                        key: value
+                        for key, value in {
+                            "signal_instance_id": intent.signal_id,
+                            "signal_family": intent.signal_family,
+                            "model_version": intent.model_version,
+                            "feature_set": intent.feature_set,
+                            "raw_event_id": intent.raw_event_id,
+                        }.items()
+                        if value is not None
+                    },
                     "rationale": list(intent.rationale),
                 }
                 for intent in self.trade_intents
@@ -266,14 +280,28 @@ class RuntimeCycleResult:
                     "symbol_id": decision.symbol_id,
                     "reason_code": decision.reason_code,
                     "reason": decision.reason,
+                    "confidence": decision.confidence,
                     "confidence_score": decision.confidence_score,
                     "threshold": decision.threshold,
                     "score": decision.score,
                     "event_type": decision.event_type,
                     "event_group": decision.event_group,
-                    "raw_event_id": decision.raw_event_id,
-                    "signal_id": decision.signal_id,
+                    "signal_id": decision.signal_family or decision.signal_id,
+                    "signal_version": decision.signal_version,
+                    "asset": decision.asset,
+                    "direction": decision.direction,
                     "detected_at": decision.detected_at.isoformat(),
+                    "audit_metadata": {
+                        key: value
+                        for key, value in {
+                            "signal_instance_id": decision.signal_id,
+                            "signal_family": decision.signal_family,
+                            "model_version": decision.model_version,
+                            "feature_set": decision.feature_set,
+                            "raw_event_id": decision.raw_event_id,
+                        }.items()
+                        if value is not None
+                    },
                     "rationale": list(decision.rationale),
                 }
                 for decision in self.no_trade_decisions
@@ -346,21 +374,35 @@ class RuntimeCycleResult:
                     "notional_usd": round(intent.notional_usd, 2),
                     "quantity": round(intent.quantity, 8),
                     "score": intent.score,
+                    "confidence": intent.confidence,
                     "confidence_score": intent.confidence_score,
                     "expected_move": intent.expected_move,
                     "expected_move_fraction": intent.expected_move_fraction,
                     "stop_distance_fraction": intent.stop_distance_fraction,
                     "risk_reward_ratio": intent.risk_reward_ratio,
                     "generated_at": intent.generated_at.isoformat(),
-                    "signal_id": intent.signal_id,
-                    "raw_event_id": intent.raw_event_id,
+                    "signal_id": intent.signal_family or intent.signal_id,
+                    "signal_version": intent.signal_version,
+                    "heuristic_version": intent.heuristic_version,
+                    "asset": intent.asset,
+                    "direction": intent.direction,
                     "event_type": intent.event_type,
                     "event_group": intent.event_group,
                     "exit_horizon_label": intent.exit_horizon_label,
                     "position_id": intent.position_id,
                     "selection_rank": intent.selection_rank,
                     "selection_composite_score": intent.selection_composite_score,
-                    "heuristic_version": intent.heuristic_version,
+                    "audit_metadata": {
+                        key: value
+                        for key, value in {
+                            "signal_instance_id": intent.signal_id,
+                            "signal_family": intent.signal_family,
+                            "model_version": intent.model_version,
+                            "feature_set": intent.feature_set,
+                            "raw_event_id": intent.raw_event_id,
+                        }.items()
+                        if value is not None
+                    },
                 }
                 for intent in self.trade_intents[-10:]
             ],
@@ -369,13 +411,27 @@ class RuntimeCycleResult:
                     "symbol_id": decision.symbol_id,
                     "reason_code": decision.reason_code,
                     "reason": decision.reason,
+                    "confidence": decision.confidence,
                     "confidence_score": decision.confidence_score,
                     "threshold": decision.threshold,
                     "score": decision.score,
                     "event_type": decision.event_type,
-                    "raw_event_id": decision.raw_event_id,
-                    "signal_id": decision.signal_id,
+                    "signal_id": decision.signal_family or decision.signal_id,
+                    "signal_version": decision.signal_version,
+                    "asset": decision.asset,
+                    "direction": decision.direction,
                     "detected_at": decision.detected_at.isoformat(),
+                    "audit_metadata": {
+                        key: value
+                        for key, value in {
+                            "signal_instance_id": decision.signal_id,
+                            "signal_family": decision.signal_family,
+                            "model_version": decision.model_version,
+                            "feature_set": decision.feature_set,
+                            "raw_event_id": decision.raw_event_id,
+                        }.items()
+                        if value is not None
+                    },
                 }
                 for decision in self.no_trade_decisions[-10:]
             ],
@@ -1745,13 +1801,27 @@ class TradingApplication:
                             "symbol_id": decision.symbol_id,
                             "reason_code": decision.reason_code,
                             "reason": decision.reason,
+                            "confidence": decision.confidence,
                             "confidence_score": decision.confidence_score,
                             "threshold": decision.threshold,
                             "score": decision.score,
                             "event_type": decision.event_type,
-                            "raw_event_id": decision.raw_event_id,
-                            "signal_id": decision.signal_id,
+                            "signal_id": decision.signal_family or decision.signal_id,
+                            "signal_version": decision.signal_version,
+                            "asset": decision.asset,
+                            "direction": decision.direction,
                             "detected_at": decision.detected_at.isoformat(),
+                            "audit_metadata": {
+                                key: value
+                                for key, value in {
+                                    "signal_instance_id": decision.signal_id,
+                                    "signal_family": decision.signal_family,
+                                    "model_version": decision.model_version,
+                                    "feature_set": decision.feature_set,
+                                    "raw_event_id": decision.raw_event_id,
+                                }.items()
+                                if value is not None
+                            },
                         }
                         for decision in no_trade_decisions[-10:]
                     ]

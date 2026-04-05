@@ -155,3 +155,89 @@ def test_trade_journal_summarizes_event_type_performance_metrics() -> None:
     assert eth_metrics.avg_return == pytest.approx(0.03)
     assert eth_metrics.hit_rate == pytest.approx(1.0)
     assert eth_metrics.realized_pnl_usd == pytest.approx(45.0)
+
+
+def test_trade_journal_tracks_metrics_by_signal_family_and_version() -> None:
+    entries = (
+        TradeJournalEntry(
+            entry_id="signal-close-1",
+            recorded_at=_DEF_TIME,
+            symbol_id="btc_usd",
+            side="sell",
+            event_type="full_exit",
+            quantity=0.01,
+            price=52_000.0,
+            realized_pnl_usd=20.0,
+            realized_return_fraction=0.04,
+            signal_id="signal-001",
+            signal_family="news_sentiment",
+            signal_version="v1",
+            heuristic_version="v3",
+            model_version="gpt-5.3",
+            feature_set="news+price",
+            asset="BTC",
+            direction="long",
+            confidence=0.72,
+        ),
+        TradeJournalEntry(
+            entry_id="signal-close-2",
+            recorded_at=_DEF_TIME.replace(minute=5),
+            symbol_id="btc_usd",
+            side="sell",
+            event_type="full_exit",
+            quantity=0.01,
+            price=49_500.0,
+            realized_pnl_usd=-10.0,
+            realized_return_fraction=-0.02,
+            signal_id="signal-002",
+            signal_family="news_sentiment",
+            signal_version="v1",
+            heuristic_version="v3",
+            model_version="gpt-5.3",
+            feature_set="news+price",
+            asset="BTC",
+            direction="long",
+            confidence=0.68,
+        ),
+        TradeJournalEntry(
+            entry_id="signal-close-3",
+            recorded_at=_DEF_TIME.replace(minute=10),
+            symbol_id="eth_usd",
+            side="sell",
+            event_type="full_exit",
+            quantity=0.5,
+            price=3_200.0,
+            realized_pnl_usd=30.0,
+            realized_return_fraction=0.06,
+            signal_id="signal-003",
+            signal_family="news_sentiment",
+            signal_version="v2",
+            heuristic_version="v3",
+            model_version="gpt-5.3",
+            feature_set="news+price+volume",
+            asset="ETH",
+            direction="long",
+            confidence=0.81,
+        ),
+    )
+
+    summary = build_trade_journal_summary(entries, recent_entry_limit=3)
+
+    signal_metrics = summary.signal_performance["news_sentiment"]
+    version_v1_metrics = summary.signal_version_performance["news_sentiment:v1"]
+    version_v2_metrics = summary.signal_version_performance["news_sentiment:v2"]
+
+    assert signal_metrics.trade_count == 3
+    assert signal_metrics.win_rate == pytest.approx(0.6667, rel=1e-4)
+    assert signal_metrics.profit_factor == pytest.approx(5.0)
+    assert signal_metrics.max_drawdown_fraction == pytest.approx(0.02)
+
+    assert version_v1_metrics.trade_count == 2
+    assert version_v1_metrics.win_rate == pytest.approx(0.5)
+    assert version_v1_metrics.profit_factor == pytest.approx(2.0)
+    assert version_v1_metrics.max_drawdown_fraction == pytest.approx(0.02)
+
+    assert version_v2_metrics.trade_count == 1
+    assert version_v2_metrics.win_rate == pytest.approx(1.0)
+    assert version_v2_metrics.profit_factor == 0.0
+    assert version_v2_metrics.max_drawdown_fraction == pytest.approx(0.0)

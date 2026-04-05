@@ -27,6 +27,15 @@ def _make_intent() -> TradeIntent:
         score=0.91,
         rationale=("ETF approval momentum", "Risk checks cleared"),
         generated_at=_DEF_TIME,
+        signal_id="signal-123",
+        signal_family="news_sentiment",
+        signal_version="v2",
+        heuristic_version="v3",
+        model_version="gpt-5.3",
+        feature_set="news+price+volume",
+        asset="BTC",
+        direction="long",
+        confidence=0.72,
     )
 
 
@@ -81,7 +90,17 @@ def test_trade_intent_artifact_is_serializable_and_stable() -> None:
     assert artifact.artifact_id == duplicate.artifact_id
     assert payload["agent_id"] == "agent-123"
     assert payload["payload"]["symbol_id"] == "btc_usd"
+    assert payload["payload"]["signal_id"] == "news_sentiment"
+    assert payload["payload"]["signal_version"] == "v2"
+    assert payload["payload"]["heuristic_version"] == "v3"
+    assert payload["payload"]["asset"] == "BTC"
+    assert payload["payload"]["direction"] == "long"
+    assert payload["payload"]["confidence"] == 0.72
     assert payload["payload"]["confidence_score"] == 0.91
+    audit_metadata = payload["payload"]["audit_metadata"]
+    assert audit_metadata["signal_instance_id"] == "signal-123"
+    assert audit_metadata["model_version"] == "gpt-5.3"
+    assert audit_metadata["feature_set"] == "news+price+volume"
     assert payload["payload"]["expected_move"] == "up"
     assert payload["payload"]["rationale"] == ["ETF approval momentum", "Risk checks cleared"]
 

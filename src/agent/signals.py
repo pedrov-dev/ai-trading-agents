@@ -59,6 +59,7 @@ from ingestion.prices_ingestion import PriceQuote
 
 TradeSide = Literal["buy", "sell"]
 MoveDirection = Literal["up", "down", "flat"]
+SignalDirection = Literal["long", "short"]
 
 _NEWS_SIGNAL_WEIGHT = 0.4
 _PRICE_CONFIRMATION_WEIGHT = 0.35
@@ -125,6 +126,12 @@ class Signal:
     rationale: tuple[str, ...]
     event_group: str | None = None
     signal_id: str | None = None
+    signal_family: str | None = None
+    signal_version: str | None = None
+    model_version: str | None = None
+    feature_set: str | None = None
+    asset: str | None = None
+    direction: SignalDirection | None = None
     thesis_fingerprint: str | None = None
     thesis_tokens: tuple[str, ...] = ()
     event_novelty_score: float = 1.0
@@ -156,6 +163,13 @@ class TradeIntent:
     risk_reward_ratio: float | None = None
     generated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     signal_id: str | None = None
+    signal_family: str | None = None
+    signal_version: str | None = None
+    model_version: str | None = None
+    feature_set: str | None = None
+    asset: str | None = None
+    direction: SignalDirection | None = None
+    confidence: float | None = None
     raw_event_id: str | None = None
     event_type: str | None = None
     event_group: str | None = None
@@ -169,13 +183,25 @@ class TradeIntent:
     heuristic_version: str | None = None
 
     def __post_init__(self) -> None:
-        resolved_confidence = self.score if self.confidence_score is None else self.confidence_score
-        if not 0.0 <= resolved_confidence <= 1.0:
+        resolved_confidence_score = (
+            self.score if self.confidence_score is None else self.confidence_score
+        )
+        resolved_confidence = (
+            self.confidence
+            if self.confidence is not None
+            else resolved_confidence_score
+        )
+        if not 0.0 <= resolved_confidence_score <= 1.0:
             raise ValueError("Trade intent confidence_score must be between 0.0 and 1.0.")
+        if not 0.0 <= resolved_confidence <= 1.0:
+            raise ValueError("Trade intent confidence must be between 0.0 and 1.0.")
 
         resolved_expected_move = self.expected_move or ("up" if self.side == "buy" else "down")
         if resolved_expected_move not in {"up", "down", "flat"}:
             raise ValueError("Trade intent expected_move must be one of: up, down, flat.")
+        resolved_direction = self.direction or _resolve_direction(self.side)
+        if resolved_direction not in {"long", "short"}:
+            raise ValueError("Trade intent direction must be either 'long' or 'short'.")
         if self.expected_move_fraction is not None and self.expected_move_fraction < 0:
             raise ValueError("Trade intent expected_move_fraction must be non-negative.")
         if self.stop_distance_fraction is not None and self.stop_distance_fraction < 0:
@@ -185,8 +211,11 @@ class TradeIntent:
         if self.selection_rank is not None and self.selection_rank <= 0:
             raise ValueError("Trade intent selection_rank must be positive when set.")
 
-        object.__setattr__(self, "confidence_score", round(resolved_confidence, 4))
+        object.__setattr__(self, "confidence_score", round(resolved_confidence_score, 4))
+        object.__setattr__(self, "confidence", round(resolved_confidence, 4))
         object.__setattr__(self, "expected_move", resolved_expected_move)
+        object.__setattr__(self, "direction", resolved_direction)
+        object.__setattr__(self, "asset", _infer_asset(self.asset or self.symbol_id))
         if self.expected_move_fraction is not None:
             object.__setattr__(
                 self,
@@ -227,6 +256,13 @@ class NoTradeDecision:
     event_type: str | None = None
     raw_event_id: str | None = None
     signal_id: str | None = None
+    signal_family: str | None = None
+    signal_version: str | None = None
+    model_version: str | None = None
+    feature_set: str | None = None
+    asset: str | None = None
+    direction: SignalDirection | None = None
+    confidence: float | None = None
     event_group: str | None = None
     detected_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     rationale: tuple[str, ...] = ()
@@ -238,9 +274,17 @@ class NoTradeDecision:
             raise ValueError("No-trade score must be between 0.0 and 1.0.")
         if self.threshold is not None and not 0.0 <= self.threshold <= 1.0:
             raise ValueError("No-trade threshold must be between 0.0 and 1.0 when set.")
+        if self.direction is not None and self.direction not in {"long", "short"}:
+            raise ValueError("No-trade direction must be either 'long' or 'short' when set.")
 
         object.__setattr__(self, "confidence_score", round(self.confidence_score, 4))
+        object.__setattr__(
+            self,
+            "confidence",
+            round(self.confidence if self.confidence is not None else self.confidence_score, 4),
+        )
         object.__setattr__(self, "score", round(self.score, 4))
+        object.__setattr__(self, "asset", _infer_asset(self.asset or self.symbol_id))
         if self.threshold is not None:
             object.__setattr__(self, "threshold", round(self.threshold, 4))
 
@@ -363,6 +407,15 @@ def build_signal(
             symbol_id=quote.symbol_id,
             generated_at=generated_at,
         ),
+        signal_family=_resolve_signal_family(
+            event_type=event.event_type,
+            event_group=event_group,
+        ),
+        signal_version="v1",
+        model_version="rule-based",
+        feature_set=_resolve_feature_set(volume_unavailable=volume_unavailable),
+        asset=_infer_asset(quote.symbol_id),
+        direction=_resolve_direction(side),
         raw_event_id=event.raw_event_id,
         event_type=event.event_type,
         symbol_id=quote.symbol_id,
@@ -442,6 +495,13 @@ def build_trade_intent(
         risk_reward_ratio=risk_reward_ratio,
         generated_at=signal.generated_at,
         signal_id=resolved_signal_id,
+        signal_family=signal.signal_family,
+        signal_version=signal.signal_version,
+        model_version=signal.model_version,
+        feature_set=signal.feature_set,
+        asset=signal.asset,
+        direction=signal.direction,
+        confidence=signal.confidence,
         raw_event_id=signal.raw_event_id,
         event_type=signal.event_type,
         event_group=signal.event_group,
@@ -485,6 +545,36 @@ def _confirmation_synergy_bonus(
     if news_confirmed and price_confirmed:
         return _NEWS_PRICE_SYNERGY_BONUS
     return 0.0
+
+
+def _resolve_signal_family(*, event_type: str, event_group: str | None) -> str:
+    normalized_type = event_type.lower()
+    normalized_group = (event_group or "").lower()
+    if "news" in normalized_group or any(
+        token in normalized_type for token in ("etf", "news", "fed", "sec", "cpi")
+    ):
+        return "news_sentiment"
+    if any(token in normalized_type for token in ("volume", "breakout")):
+        return "volume_breakout"
+    if any(token in normalized_type for token in ("momentum", "trend")):
+        return "momentum"
+    return normalized_group or "event_signal"
+
+
+def _resolve_feature_set(*, volume_unavailable: bool) -> str:
+    components = ["news", "price"]
+    if not volume_unavailable:
+        components.append("volume")
+    return "+".join(components)
+
+
+def _infer_asset(value: str) -> str:
+    candidate = str(value).split("_", maxsplit=1)[0].strip().upper()
+    return candidate or str(value).upper()
+
+
+def _resolve_direction(side: TradeSide) -> SignalDirection:
+    return "long" if side == "buy" else "short"
 
 
 def _build_signal_id(

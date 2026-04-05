@@ -6,7 +6,7 @@ import json
 import math
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -18,6 +18,7 @@ from agent.portfolio import (
 from agent.signals import MoveDirection, RejectedTradeCandidate
 from detection.event_types import event_performance_group
 from execution.orders import ExecutionResult
+from monitoring.drawdown import EquityPoint, build_drawdown_snapshot
 from storage.local_runtime import JsonlFileStore
 
 _CLOSE_EVENT_TYPES = {"partial_exit", "full_exit", "reverse"}
@@ -44,6 +45,13 @@ class TradeJournalEntry:
     position_entry_price: float | None = None
     position_id: str | None = None
     signal_id: str | None = None
+    signal_family: str | None = None
+    signal_version: str | None = None
+    model_version: str | None = None
+    feature_set: str | None = None
+    asset: str | None = None
+    direction: str | None = None
+    confidence: float | None = None
     raw_event_id: str | None = None
     source_event_type: str | None = None
     source_event_group: str | None = None
@@ -151,6 +159,23 @@ class TradeJournalEntry:
                 or (before_position.position_id if before_position is not None else None)
             ),
             signal_id=execution_result.request.signal_id,
+            signal_family=execution_result.request.signal_family,
+            signal_version=execution_result.request.signal_version,
+            model_version=execution_result.request.model_version,
+            feature_set=execution_result.request.feature_set,
+            asset=(
+                execution_result.request.asset
+                or execution_result.request.symbol_id.split("_", maxsplit=1)[0].upper()
+            ),
+            direction=(
+                execution_result.request.direction
+                or ("long" if execution_result.request.side == "buy" else "short")
+            ),
+            confidence=(
+                execution_result.request.confidence
+                if execution_result.request.confidence is not None
+                else confidence_score
+            ),
             raw_event_id=execution_result.request.raw_event_id,
             source_event_type=execution_result.request.event_type,
             source_event_group=event_performance_group(execution_result.request.event_type),
@@ -212,7 +237,16 @@ class TradeJournalEntry:
         position_entry_price = payload.get("position_entry_price")
         position_side = payload.get("position_side")
         position_id = payload.get("position_id")
-        signal_id = payload.get("signal_id")
+        raw_signal_id = payload.get("signal_id")
+        signal_instance_id = payload.get("signal_instance_id")
+        signal_family = payload.get("signal_family")
+        signal_version = payload.get("signal_version")
+        model_version = payload.get("model_version")
+        feature_set = payload.get("feature_set")
+        asset = payload.get("asset")
+        direction = payload.get("direction")
+        confidence = payload.get("confidence")
+        signal_id = signal_instance_id if signal_instance_id is not None else raw_signal_id
         raw_event_id = payload.get("raw_event_id")
         source_event_type = payload.get("source_event_type")
         source_event_group = payload.get("source_event_group")
@@ -269,6 +303,37 @@ class TradeJournalEntry:
             ),
             position_id=str(position_id) if position_id is not None else None,
             signal_id=str(signal_id) if signal_id is not None else None,
+            signal_family=(
+                str(signal_family)
+                if signal_family is not None
+                else str(raw_signal_id)
+                if signal_instance_id is not None and raw_signal_id is not None
+                else None
+            ),
+            signal_version=str(signal_version) if signal_version is not None else None,
+            model_version=str(model_version) if model_version is not None else None,
+            feature_set=str(feature_set) if feature_set is not None else None,
+            asset=(
+                str(asset)
+                if asset is not None
+                else str(payload.get("symbol_id", "unknown_symbol"))
+                .split("_", maxsplit=1)[0]
+                .upper()
+            ),
+            direction=(
+                str(direction)
+                if direction is not None
+                else "long"
+                if str(payload.get("side", "buy")).lower() == "buy"
+                else "short"
+            ),
+            confidence=(
+                float(confidence)
+                if confidence is not None
+                else float(payload["confidence_score"])
+                if payload.get("confidence_score") is not None
+                else None
+            ),
             raw_event_id=str(raw_event_id) if raw_event_id is not None else None,
             source_event_type=resolved_source_event_type,
             source_event_group=resolved_source_event_group,
@@ -361,7 +426,15 @@ class TradeJournalEntry:
             "position_quantity": self.position_quantity,
             "position_entry_price": self.position_entry_price,
             "position_id": self.position_id,
-            "signal_id": self.signal_id,
+            "signal_id": self.signal_family or self.signal_id,
+            "signal_instance_id": self.signal_id,
+            "signal_family": self.signal_family,
+            "signal_version": self.signal_version,
+            "model_version": self.model_version,
+            "feature_set": self.feature_set,
+            "asset": self.asset,
+            "direction": self.direction,
+            "confidence": self.confidence,
             "raw_event_id": self.raw_event_id,
             "source_event_type": self.source_event_type,
             "source_event_group": self.source_event_group,
@@ -395,14 +468,29 @@ class EventTypePerformance:
     sharpe: float
     trade_count: int
     realized_pnl_usd: float = 0.0
+    profit_factor: float = 0.0
+    max_drawdown_fraction: float = 0.0
+
+    @property
+    def win_rate(self) -> float:
+        return self.hit_rate
+
+    @property
+    def trades(self) -> int:
+        return self.trade_count
 
     def to_dict(self) -> dict[str, float | int]:
         return {
             "avg_return": self.avg_return,
             "hit_rate": self.hit_rate,
+            "win_rate": self.win_rate,
             "sharpe": self.sharpe,
             "trade_count": self.trade_count,
+            "trades": self.trades,
             "realized_pnl_usd": self.realized_pnl_usd,
+            "profit_factor": self.profit_factor,
+            "max_drawdown_fraction": self.max_drawdown_fraction,
+            "drawdown": self.max_drawdown_fraction,
         }
 
 
@@ -424,8 +512,13 @@ class TradeJournalSummary:
     event_counts: dict[str, int] = field(default_factory=dict)
     symbol_counts: dict[str, int] = field(default_factory=dict)
     source_event_counts: dict[str, int] = field(default_factory=dict)
+    signal_counts: dict[str, int] = field(default_factory=dict)
+    signal_version_counts: dict[str, int] = field(default_factory=dict)
     event_performance: dict[str, EventTypePerformance] = field(default_factory=dict)
     asset_performance: dict[str, EventTypePerformance] = field(default_factory=dict)
+    signal_performance: dict[str, EventTypePerformance] = field(default_factory=dict)
+    signal_version_performance: dict[str, EventTypePerformance] = field(default_factory=dict)
+    heuristic_version_performance: dict[str, EventTypePerformance] = field(default_factory=dict)
     open_positions: dict[str, dict[str, Any]] = field(default_factory=dict)
     recent_entries: tuple[TradeJournalEntry, ...] = ()
     last_recorded_at: datetime | None = None
@@ -446,6 +539,8 @@ class TradeJournalSummary:
             "event_counts": self.event_counts,
             "symbol_counts": self.symbol_counts,
             "source_event_counts": self.source_event_counts,
+            "signal_counts": self.signal_counts,
+            "signal_version_counts": self.signal_version_counts,
             "event_performance": {
                 event_type: metrics.to_dict()
                 for event_type, metrics in self.event_performance.items()
@@ -453,6 +548,18 @@ class TradeJournalSummary:
             "asset_performance": {
                 symbol_id: metrics.to_dict()
                 for symbol_id, metrics in self.asset_performance.items()
+            },
+            "signal_performance": {
+                signal_id: metrics.to_dict()
+                for signal_id, metrics in self.signal_performance.items()
+            },
+            "signal_version_performance": {
+                version_key: metrics.to_dict()
+                for version_key, metrics in self.signal_version_performance.items()
+            },
+            "heuristic_version_performance": {
+                version_key: metrics.to_dict()
+                for version_key, metrics in self.heuristic_version_performance.items()
             },
             "open_positions": self.open_positions,
             "recent_entries": [entry.to_dict() for entry in self.recent_entries],
@@ -554,6 +661,12 @@ def build_trade_journal_summary(
     source_event_counts = Counter(
         entry.source_event_group for entry in ordered if entry.source_event_group
     )
+    signal_counts = Counter(
+        key for entry in ordered if (key := _signal_bucket_key(entry)) is not None
+    )
+    signal_version_counts = Counter(
+        key for entry in ordered if (key := _signal_version_bucket_key(entry)) is not None
+    )
     close_entries = [entry for entry in ordered if entry.event_type in _CLOSE_EVENT_TYPES]
     open_positions: dict[str, dict[str, Any]] = {}
 
@@ -567,7 +680,16 @@ def build_trade_journal_summary(
             "side": entry.position_side,
             "quantity": entry.position_quantity,
             "entry_price": entry.position_entry_price,
-            "signal_id": entry.signal_id,
+            "signal_id": entry.signal_family or entry.signal_id,
+            "signal_instance_id": entry.signal_id,
+            "signal_family": entry.signal_family,
+            "signal_version": entry.signal_version,
+            "heuristic_version": entry.heuristic_version,
+            "model_version": entry.model_version,
+            "feature_set": entry.feature_set,
+            "asset": entry.asset,
+            "direction": entry.direction,
+            "confidence": entry.confidence,
             "raw_event_id": entry.raw_event_id,
             "source_event_type": entry.source_event_type,
             "source_event_group": entry.source_event_group,
@@ -605,8 +727,13 @@ def build_trade_journal_summary(
         event_counts=dict(event_counts),
         symbol_counts=dict(symbol_counts),
         source_event_counts=dict(source_event_counts),
+        signal_counts=dict(signal_counts),
+        signal_version_counts=dict(signal_version_counts),
         event_performance=_build_event_performance(close_entries),
         asset_performance=_build_asset_performance(close_entries),
+        signal_performance=_build_signal_performance(close_entries),
+        signal_version_performance=_build_signal_version_performance(close_entries),
+        heuristic_version_performance=_build_heuristic_version_performance(close_entries),
         open_positions=open_positions,
         recent_entries=ordered[-recent_entry_limit:],
         last_recorded_at=ordered[-1].recorded_at if ordered else None,
@@ -648,59 +775,127 @@ def _derive_event_type(
 def _build_event_performance(
     close_entries: list[TradeJournalEntry],
 ) -> dict[str, EventTypePerformance]:
-    grouped_returns: dict[str, list[float]] = {}
-    grouped_realized_pnl: dict[str, float] = {}
-
-    for entry in close_entries:
-        if entry.source_event_group is None:
-            continue
-        grouped_realized_pnl[entry.source_event_group] = round(
-            grouped_realized_pnl.get(entry.source_event_group, 0.0) + entry.realized_pnl_usd,
-            2,
-        )
-        if entry.realized_return_fraction is None:
-            continue
-        grouped_returns.setdefault(entry.source_event_group, []).append(
-            entry.realized_return_fraction
-        )
-
-    return {
-        event_type: EventTypePerformance(
-            avg_return=round(sum(returns) / len(returns), 6),
-            hit_rate=round(sum(1 for item in returns if item > 0) / len(returns), 4),
-            sharpe=round(_calculate_sharpe_ratio(returns), 6),
-            trade_count=len(returns),
-            realized_pnl_usd=grouped_realized_pnl.get(event_type, 0.0),
-        )
-        for event_type, returns in sorted(grouped_returns.items())
-    }
+    return _build_grouped_performance(
+        close_entries,
+        key_resolver=lambda entry: entry.source_event_group,
+    )
 
 
 def _build_asset_performance(
     close_entries: list[TradeJournalEntry],
 ) -> dict[str, EventTypePerformance]:
-    grouped_returns: dict[str, list[float]] = {}
-    grouped_realized_pnl: dict[str, float] = {}
+    return _build_grouped_performance(
+        close_entries,
+        key_resolver=lambda entry: entry.symbol_id,
+    )
+
+
+def _build_signal_performance(
+    close_entries: list[TradeJournalEntry],
+) -> dict[str, EventTypePerformance]:
+    return _build_grouped_performance(
+        close_entries,
+        key_resolver=_signal_bucket_key,
+    )
+
+
+def _build_signal_version_performance(
+    close_entries: list[TradeJournalEntry],
+) -> dict[str, EventTypePerformance]:
+    return _build_grouped_performance(
+        close_entries,
+        key_resolver=_signal_version_bucket_key,
+    )
+
+
+def _build_heuristic_version_performance(
+    close_entries: list[TradeJournalEntry],
+) -> dict[str, EventTypePerformance]:
+    return _build_grouped_performance(
+        close_entries,
+        key_resolver=lambda entry: entry.heuristic_version,
+    )
+
+
+def _build_grouped_performance(
+    close_entries: list[TradeJournalEntry],
+    *,
+    key_resolver: Any,
+) -> dict[str, EventTypePerformance]:
+    grouped_entries: dict[str, list[TradeJournalEntry]] = {}
 
     for entry in close_entries:
-        grouped_realized_pnl[entry.symbol_id] = round(
-            grouped_realized_pnl.get(entry.symbol_id, 0.0) + entry.realized_pnl_usd,
-            2,
-        )
-        if entry.realized_return_fraction is None:
+        key = key_resolver(entry)
+        if key is None:
             continue
-        grouped_returns.setdefault(entry.symbol_id, []).append(entry.realized_return_fraction)
+        grouped_entries.setdefault(str(key), []).append(entry)
 
     return {
-        symbol_id: EventTypePerformance(
-            avg_return=round(sum(returns) / len(returns), 6),
-            hit_rate=round(sum(1 for item in returns if item > 0) / len(returns), 4),
-            sharpe=round(_calculate_sharpe_ratio(returns), 6),
-            trade_count=len(returns),
-            realized_pnl_usd=grouped_realized_pnl.get(symbol_id, 0.0),
-        )
-        for symbol_id, returns in sorted(grouped_returns.items())
+        key: _calculate_group_metrics(entries)
+        for key, entries in sorted(grouped_entries.items())
     }
+
+
+def _calculate_group_metrics(entries: list[TradeJournalEntry]) -> EventTypePerformance:
+    returns = [
+        entry.realized_return_fraction
+        for entry in entries
+        if entry.realized_return_fraction is not None
+    ]
+    trade_count = len(entries)
+    win_rate = (
+        round(sum(1 for entry in entries if entry.realized_pnl_usd > 0) / trade_count, 4)
+        if trade_count
+        else 0.0
+    )
+    realized_pnl_usd = round(sum(entry.realized_pnl_usd for entry in entries), 2)
+    return EventTypePerformance(
+        avg_return=round(sum(returns) / len(returns), 6) if returns else 0.0,
+        hit_rate=win_rate,
+        sharpe=round(_calculate_sharpe_ratio(returns), 6) if returns else 0.0,
+        trade_count=trade_count,
+        realized_pnl_usd=realized_pnl_usd,
+        profit_factor=_calculate_profit_factor(entries),
+        max_drawdown_fraction=_calculate_max_drawdown_fraction(returns),
+    )
+
+
+def _signal_bucket_key(entry: TradeJournalEntry) -> str | None:
+    return entry.signal_family or entry.signal_id
+
+
+def _signal_version_bucket_key(entry: TradeJournalEntry) -> str | None:
+    signal_key = _signal_bucket_key(entry)
+    if signal_key is None or entry.signal_version is None:
+        return None
+    return f"{signal_key}:{entry.signal_version}"
+
+
+def _calculate_profit_factor(entries: list[TradeJournalEntry]) -> float:
+    gross_profit = sum(entry.realized_pnl_usd for entry in entries if entry.realized_pnl_usd > 0)
+    gross_loss = abs(
+        sum(entry.realized_pnl_usd for entry in entries if entry.realized_pnl_usd < 0)
+    )
+    if gross_profit <= 0 or gross_loss <= 0:
+        return 0.0
+    return round(gross_profit / gross_loss, 6)
+
+
+def _calculate_max_drawdown_fraction(returns: list[float]) -> float:
+    if not returns:
+        return 0.0
+
+    equity = 1.0
+    history: list[EquityPoint] = []
+    for index, trade_return in enumerate(returns):
+        equity *= 1.0 + trade_return
+        history.append(
+            EquityPoint(
+                recorded_at=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=index),
+                equity=round(max(equity, 0.000001), 6),
+            )
+        )
+    return round(build_drawdown_snapshot(history).max_drawdown_fraction, 6)
 
 
 def _calculate_trade_frequency(
