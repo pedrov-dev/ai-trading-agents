@@ -112,7 +112,8 @@ class SimpleEventDrivenStrategy:
         exit_config: ExitConfig | None = None,
     ) -> None:
         self._config = config or StrategyConfig()
-        self._risk_manager = RiskManager(risk_config or RiskConfig())
+        self._risk_config = risk_config or RiskConfig()
+        self._risk_manager = RiskManager(self._risk_config)
         self._exit_config = exit_config or ExitConfig()
         self._thesis_cooldowns: dict[tuple[str, str], list[_ThesisCooldownState]] = {}
 
@@ -138,8 +139,6 @@ class SimpleEventDrivenStrategy:
             recent_theses = self._recent_thesis_states(signal=base_signal)
             signal = self._apply_thesis_cooldown(signal=base_signal)
             if signal.score < self._config.min_signal_score:
-                continue
-            if portfolio.has_open_position(signal.symbol_id):
                 continue
 
             proposed_notional = self._risk_manager.size_for_signal(
@@ -173,6 +172,8 @@ class SimpleEventDrivenStrategy:
                 ranked_signals[signal.symbol_id] = ranked_signal
 
         intents: list[TradeIntent] = []
+        planned_intents_by_symbol: dict[str, int] = {}
+        selected_new_symbols: set[str] = set()
         selected_signal_count = 0
         max_ranked_signals = self._max_ranked_signals_per_cycle()
 
@@ -182,19 +183,51 @@ class SimpleEventDrivenStrategy:
             reverse=True,
         ):
             signal = ranked_signal.signal
-            intents.extend(
-                _build_horizon_trade_intents(
-                    signal=signal,
-                    allowed_notional=ranked_signal.risk_result.allowed_notional,
-                    rationale_suffix=ranked_signal.risk_result.notes
-                    + (
-                        "Signal selected in the top "
-                        f"{max_ranked_signals} ranked opportunities for this cycle.",
-                        f"Event {signal.event_type} cleared all configured risk checks.",
-                    ),
-                    exit_config=self._exit_config,
-                )
+            if not self._can_allocate_symbol(
+                symbol_id=signal.symbol_id,
+                portfolio=portfolio,
+                selected_new_symbols=selected_new_symbols,
+            ):
+                continue
+
+            available_intent_slots = self._available_intent_slots_for_symbol(
+                symbol_id=signal.symbol_id,
+                portfolio=portfolio,
+                planned_intents_by_symbol=planned_intents_by_symbol,
             )
+            if available_intent_slots == 0:
+                continue
+
+            rationale_suffix = ranked_signal.risk_result.notes + (
+                "Signal selected in the top "
+                f"{max_ranked_signals} ranked opportunities for this cycle.",
+                f"Event {signal.event_type} cleared all configured risk checks.",
+            )
+            if available_intent_slots is not None and available_intent_slots < len(
+                self._exit_config.target_horizons
+            ):
+                rationale_suffix += (
+                    "Opportunity budget capped "
+                    f"{signal.symbol_id} to {available_intent_slots} active position "
+                    "slot(s) this cycle.",
+                )
+
+            symbol_intents = _build_horizon_trade_intents(
+                signal=signal,
+                allowed_notional=ranked_signal.risk_result.allowed_notional,
+                rationale_suffix=rationale_suffix,
+                exit_config=self._exit_config,
+                max_intents=available_intent_slots,
+            )
+            if not symbol_intents:
+                continue
+
+            intents.extend(symbol_intents)
+            planned_intents_by_symbol[signal.symbol_id] = (
+                planned_intents_by_symbol.get(signal.symbol_id, 0) + len(symbol_intents)
+            )
+            if not portfolio.has_open_position(signal.symbol_id):
+                selected_new_symbols.add(signal.symbol_id)
             selected_signal_count += 1
 
             if selected_signal_count >= max_ranked_signals:
@@ -207,6 +240,38 @@ class SimpleEventDrivenStrategy:
         if configured_limit is None:
             configured_limit = self._config.max_intents_per_cycle
         return max(1, configured_limit)
+
+    def _can_allocate_symbol(
+        self,
+        *,
+        symbol_id: str,
+        portfolio: PortfolioSnapshot,
+        selected_new_symbols: set[str],
+    ) -> bool:
+        if portfolio.has_open_position(symbol_id):
+            return True
+        if self._risk_config.max_concurrent_positions <= 0:
+            return False
+        return (
+            portfolio.open_symbol_count() + len(selected_new_symbols)
+            < self._risk_config.max_concurrent_positions
+        )
+
+    def _available_intent_slots_for_symbol(
+        self,
+        *,
+        symbol_id: str,
+        portfolio: PortfolioSnapshot,
+        planned_intents_by_symbol: dict[str, int],
+    ) -> int | None:
+        max_positions_per_asset = self._risk_config.max_positions_per_asset
+        if max_positions_per_asset is None:
+            return None
+        if max_positions_per_asset <= 0:
+            return 0
+        current_positions = len(portfolio.positions_for_symbol(symbol_id))
+        planned_positions = planned_intents_by_symbol.get(symbol_id, 0)
+        return max(0, max_positions_per_asset - current_positions - planned_positions)
 
     def _recent_thesis_states(self, *, signal: Signal) -> tuple[_ThesisCooldownState, ...]:
         if not self._config.thesis_cooldown_enabled or self._config.thesis_cooldown_hours <= 0:
@@ -591,8 +656,14 @@ def _build_horizon_trade_intents(
     allowed_notional: float,
     rationale_suffix: tuple[str, ...],
     exit_config: ExitConfig,
+    max_intents: int | None = None,
 ) -> list[TradeIntent]:
+    if max_intents is not None and max_intents <= 0:
+        return []
+
     horizons = tuple(horizon for horizon in exit_config.target_horizons if horizon.weight > 0)
+    if max_intents is not None:
+        horizons = horizons[:max_intents]
     if not horizons:
         return [
             build_trade_intent(

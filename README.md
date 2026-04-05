@@ -33,6 +33,7 @@ It shows portfolio/performance metrics from `artifacts/run_summary.json`, includ
 - ingests RSS articles and Kraken price quotes
 - classifies crypto-relevant events
 - generates explainable trade intents
+- applies an opportunity budget (`max_positions=3`, `max_per_asset=1` by default) so the agent keeps searching beyond a single BTC-heavy book
 - runs conservative risk-aware Kraken paper validation or live submission
 - writes audit logs, validation artifacts, checkpoints, and a run summary
 

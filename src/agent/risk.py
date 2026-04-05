@@ -16,6 +16,7 @@ class RiskConfig:
     max_position_fraction: float = 0.05
     max_daily_loss_fraction: float = 0.03
     max_concurrent_positions: int = 3
+    max_positions_per_asset: int | None = None
     cooldown_minutes_after_loss: int = 30
     min_notional_usd: float = 50.0
 
@@ -67,7 +68,6 @@ class RiskManager:
         now: datetime | None = None,
         reduce_only: bool = False,
     ) -> RiskCheckResult:
-        del signal
         checked_at = now or datetime.now(UTC)
         max_position_notional = portfolio.total_equity * self._config.max_position_fraction
         capped_notional = min(proposed_notional, max_position_notional)
@@ -107,6 +107,20 @@ class RiskManager:
                         message="Maximum concurrent symbols already open.",
                     )
                 )
+
+            max_positions_per_asset = self._config.max_positions_per_asset
+            if max_positions_per_asset is not None and max_positions_per_asset > 0:
+                open_positions_for_symbol = len(portfolio.positions_for_symbol(signal.symbol_id))
+                if open_positions_for_symbol >= max_positions_per_asset:
+                    violations.append(
+                        RiskViolation(
+                            code="max_positions_per_asset",
+                            message=(
+                                "Opportunity budget already allocated to "
+                                f"{signal.symbol_id}."
+                            ),
+                        )
+                    )
 
             if portfolio.consecutive_losses > 0 and portfolio.last_loss_at is not None:
                 cooldown_until = portfolio.last_loss_at + timedelta(

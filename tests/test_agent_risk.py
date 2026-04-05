@@ -66,6 +66,27 @@ def test_risk_manager_blocks_when_max_concurrent_positions_is_reached() -> None:
     assert any(violation.code == "max_concurrent_positions" for violation in result.violations)
 
 
+def test_risk_manager_blocks_when_symbol_reaches_max_positions_per_asset() -> None:
+    portfolio = PortfolioSnapshot(
+        total_equity=10_000.0,
+        cash_usd=7_500.0,
+        positions=(
+            Position(symbol_id="btc_usd", side="long", quantity=0.05, entry_price=68_000.0),
+        ),
+    )
+    manager = RiskManager(
+        RiskConfig(
+            max_concurrent_positions=3,
+            max_positions_per_asset=1,
+        )
+    )
+
+    result = manager.evaluate(signal=_make_signal(), portfolio=portfolio, proposed_notional=300.0)
+
+    assert result.approved is False
+    assert any(violation.code == "max_positions_per_asset" for violation in result.violations)
+
+
 def test_risk_manager_enforces_cooldown_after_losses() -> None:
     portfolio = PortfolioSnapshot(
         total_equity=10_000.0,

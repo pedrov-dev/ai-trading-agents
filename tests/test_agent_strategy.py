@@ -571,6 +571,112 @@ def test_strategy_adds_ranking_breakdown_to_selected_intent_rationale() -> None:
     assert "diversification=" in ranking_text
 
 
+def test_strategy_respects_opportunity_budget_and_searches_beyond_btc() -> None:
+    strategy = SimpleEventDrivenStrategy(
+        config=StrategyConfig(
+            min_signal_score=0.6,
+            max_ranked_signals_per_cycle=3,
+            confidence_weight=0.7,
+            novelty_weight=0.2,
+            risk_reward_weight=0.1,
+            diversification_weight=0.0,
+        ),
+        risk_config=RiskConfig(
+            max_position_fraction=0.05,
+            max_concurrent_positions=3,
+            max_positions_per_asset=1,
+        ),
+    )
+    portfolio = PortfolioSnapshot(
+        total_equity=10_000.0,
+        cash_usd=8_000.0,
+        positions=(
+            Position(
+                symbol_id="btc_usd",
+                side="long",
+                quantity=0.01,
+                entry_price=68_000.0,
+                event_type="ETF_APPROVAL",
+            ),
+            Position(
+                symbol_id="eth_usd",
+                side="long",
+                quantity=0.5,
+                entry_price=3_300.0,
+                event_type="TECHNICAL_BREAKOUT",
+            ),
+        ),
+    )
+    events = [
+        DetectedEvent(
+            raw_event_id="evt-btc-repeat",
+            event_type="ETF_APPROVAL",
+            rule_name="btc_repeat",
+            confidence=0.97,
+            matched_text="bitcoin etf approval keeps driving upside momentum",
+            detected_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC),
+        ),
+        DetectedEvent(
+            raw_event_id="evt-sol-budget",
+            event_type="TECHNICAL_BREAKOUT",
+            rule_name="sol_breakout",
+            confidence=0.9,
+            matched_text="solana breakout extends bullish momentum",
+            detected_at=datetime(2026, 4, 3, 12, 2, tzinfo=UTC),
+        ),
+        DetectedEvent(
+            raw_event_id="evt-xrp-budget",
+            event_type="REGULATORY_ACTION",
+            rule_name="xrp_regulatory",
+            confidence=0.74,
+            matched_text="xrp faces fresh sec enforcement pressure",
+            detected_at=datetime(2026, 4, 3, 12, 5, tzinfo=UTC),
+        ),
+    ]
+    prices = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=68_200.0,
+            open=67_000.0,
+            high=68_400.0,
+            low=66_900.0,
+            prev_close=66_800.0,
+            timestamp=1712100000,
+            asset_class="spot",
+        ),
+        PriceQuote(
+            symbol_id="sol_usd",
+            current=124.0,
+            open=120.0,
+            high=126.0,
+            low=118.0,
+            prev_close=119.0,
+            timestamp=1712100000,
+            asset_class="spot",
+        ),
+        PriceQuote(
+            symbol_id="xrp_usd",
+            current=0.49,
+            open=0.55,
+            high=0.56,
+            low=0.48,
+            prev_close=0.54,
+            timestamp=1712100000,
+            asset_class="spot",
+        ),
+    ]
+
+    intents = strategy.generate_trade_intents(
+        detected_events=events,
+        price_quotes=prices,
+        portfolio=portfolio,
+    )
+
+    assert len(intents) == 1
+    assert [intent.symbol_id for intent in intents] == ["sol_usd"]
+    assert [intent.exit_horizon_label for intent in intents] == ["5m"]
+
+
 def test_strategy_generates_exit_intent_when_take_profit_is_hit() -> None:
     strategy = SimpleEventDrivenStrategy(
         exit_config=ExitConfig(

@@ -53,8 +53,13 @@ This is the default and safest mode. Orders go through Kraken's validation path 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 python src/main.py --base-dir . --trading-mode paper --preflight
-python src/main.py --base-dir . --trading-mode paper
+python src/main.py --base-dir . --trading-mode paper --max-positions 3 --max-per-asset 1
 ```
+
+The default runtime opportunity budget is already conservative:
+
+- `--max-positions 3` keeps the book focused on the top three concurrent symbols
+- `--max-per-asset 1` prevents the strategy from stacking every slot into BTC and forces it to keep searching for the next best asset
 
 Artifacts written after the run:
 

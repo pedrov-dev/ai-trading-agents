@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from agent.portfolio import LocalPortfolioStateProvider, PortfolioSnapshot
+from agent.risk import RiskConfig
 from agent.signals import TradeIntent
 from agent.strategy import SimpleEventDrivenStrategy
 from detection.event_detection import DetectedEvent, RuleBasedEventDetector
@@ -649,6 +650,7 @@ class TradingApplication:
         scheduler: InfoScheduler | None = None,
         identity_registry: IdentityRegistry | None = None,
         execution_config: KrakenCLIConfig | None = None,
+        risk_config: RiskConfig | None = None,
         execution_runner: CommandRunner | None = None,
         runtime_env: Mapping[str, str] | None = None,
         runtime_mode: str = "local",
@@ -714,7 +716,11 @@ class TradingApplication:
             raw_events_repository=self._raw_events_repository,
             event_detection_repository=self._event_repository,
         )
-        self._strategy = SimpleEventDrivenStrategy()
+        self._risk_config = risk_config or RiskConfig(
+            max_concurrent_positions=3,
+            max_positions_per_asset=1,
+        )
+        self._strategy = SimpleEventDrivenStrategy(risk_config=self._risk_config)
         resolved_execution_config = execution_config or KrakenCLIConfig(
             dry_run=False,
             live_enabled=True,
@@ -822,6 +828,10 @@ class TradingApplication:
                 if self._storage_backend == "explicit_override"
                 else "unknown"
             ),
+            "opportunity_budget": {
+                "max_positions": self._risk_config.max_concurrent_positions,
+                "max_per_asset": self._risk_config.max_positions_per_asset,
+            },
         }
 
     def _initialize_identity(self, registry: IdentityRegistry) -> AgentIdentity:
@@ -1806,6 +1816,9 @@ def build_local_demo_app(
     identity_layer: str | None = None,
     env: Mapping[str, str] | None = None,
     execution_config: KrakenCLIConfig | None = None,
+    risk_config: RiskConfig | None = None,
+    max_positions: int = 3,
+    max_per_asset: int = 1,
     execution_runner: CommandRunner | None = None,
     runs_repository: IngestionRunsRepository | None = None,
     raw_events_repository: RawEventsRepository | None = None,
@@ -1825,6 +1838,10 @@ def build_local_demo_app(
     runtime_env["IDENTITY_LAYER"] = resolved_identity_layer
     paths = RuntimePaths.from_base_dir(base_dir)
     agent_profile = _load_agent_profile(runtime_env, resolved_runtime_mode)
+    resolved_risk_config = risk_config or RiskConfig(
+        max_concurrent_positions=max_positions,
+        max_positions_per_asset=max_per_asset,
+    )
     return TradingApplication(
         paths=paths,
         feed_groups=feed_groups or RSS_FEED_GROUPS,
@@ -1836,6 +1853,7 @@ def build_local_demo_app(
             env=runtime_env,
         ),
         execution_config=execution_config or _build_execution_config(paths=paths, env=runtime_env),
+        risk_config=resolved_risk_config,
         execution_runner=execution_runner,
         runtime_env=runtime_env,
         runtime_mode=resolved_runtime_mode,
@@ -2257,6 +2275,18 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         help="Run the recurring scheduler instead of a one-shot cycle.",
     )
     parser.add_argument(
+        "--max-positions",
+        type=int,
+        default=int(os.environ.get("OPPORTUNITY_MAX_POSITIONS", "3")),
+        help="Opportunity budget: maximum concurrent symbols the agent may hold.",
+    )
+    parser.add_argument(
+        "--max-per-asset",
+        type=int,
+        default=int(os.environ.get("OPPORTUNITY_MAX_PER_ASSET", "1")),
+        help="Opportunity budget: maximum active position slots allowed per asset.",
+    )
+    parser.add_argument(
         "--preflight",
         action="store_true",
         help="Validate Kraken and optional ERC-8004 configuration without running a cycle.",
@@ -2350,6 +2380,8 @@ def main() -> int:
             trading_mode=resolved_trading_mode,
             identity_layer=args.identity_layer,
             env=resolved_env,
+            max_positions=args.max_positions,
+            max_per_asset=args.max_per_asset,
         )
 
         if args.serve:
