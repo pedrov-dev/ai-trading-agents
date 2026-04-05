@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from agent.signals import build_signal, build_trade_intent
+from agent.signals import build_signal, build_trade_intent, select_quote_for_event
 from detection.event_detection import DetectedEvent
 from ingestion.prices_ingestion import PriceQuote
 
@@ -302,3 +302,41 @@ def test_build_signal_strengthens_bearish_setup_with_volume_spike() -> None:
     assert confirmed_signal.score > base_signal.score
     assert any("price breakdown" in reason.lower() for reason in confirmed_signal.rationale)
     assert any("volume spike" in reason.lower() for reason in confirmed_signal.rationale)
+
+
+def test_select_quote_for_event_matches_new_toncoin_keywords() -> None:
+    event = DetectedEvent(
+        raw_event_id="evt-ton",
+        event_type="TOKEN_LISTING",
+        rule_name="telegram_listing",
+        confidence=0.84,
+        matched_text="Telegram ecosystem momentum lifts Toncoin after a new listing.",
+        detected_at=datetime(2026, 4, 4, 12, 0, tzinfo=UTC),
+    )
+    quotes = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=68_000.0,
+            open=67_500.0,
+            high=68_400.0,
+            low=67_100.0,
+            prev_close=67_300.0,
+            timestamp=1712193600,
+            asset_class="spot",
+        ),
+        PriceQuote(
+            symbol_id="ton_usd",
+            current=5.4,
+            open=5.1,
+            high=5.5,
+            low=5.0,
+            prev_close=5.0,
+            timestamp=1712193600,
+            asset_class="spot",
+        ),
+    ]
+
+    quote = select_quote_for_event(event=event, price_quotes=quotes)
+
+    assert quote is not None
+    assert quote.symbol_id == "ton_usd"

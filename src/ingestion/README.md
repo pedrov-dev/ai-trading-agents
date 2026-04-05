@@ -26,4 +26,6 @@ service.fetch_and_persist_current_prices(pipeline)
 
 ## Notes
 
+- `PRICE_SYMBOLS` now represents the Tier A core universe polled every 60 seconds.
+- `SECONDARY_PRICE_SYMBOLS` exposes the Tier B event-driven universe intended for hourly or trigger-based fetches.
 - Configure storage backend and network endpoints in the storage layer; Kraken and RSS endpoints are public by default.

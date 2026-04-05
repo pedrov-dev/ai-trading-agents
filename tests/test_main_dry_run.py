@@ -10,7 +10,7 @@ from agent.signals import TradeIntent
 from detection.event_detection_postgres import PostgresEventDetectionRepository
 from execution.kraken_cli import CommandRunResult, KrakenCLIConfig
 from identity.erc8004_registry import SepoliaContractsConfig
-from ingestion.prices_config import PRICE_SYMBOLS
+from ingestion.prices_config import PRICE_SYMBOLS, SECONDARY_PRICE_SYMBOLS
 from ingestion.prices_ingestion import PriceQuote
 from ingestion.rss_config import FeedSource
 from main import (
@@ -28,6 +28,9 @@ from tests.storage_fakes import (
 )
 
 BTC_SYMBOL = next(symbol for symbol in PRICE_SYMBOLS if symbol.symbol_id == "btc_usd")
+MATIC_SYMBOL = next(
+    symbol for symbol in SECONDARY_PRICE_SYMBOLS if symbol.symbol_id == "matic_usd"
+)
 
 
 def _storage_overrides(tmp_path: Path) -> dict[str, object]:
@@ -163,6 +166,59 @@ def test_kraken_paper_app_closes_open_position_on_take_profit(tmp_path: Path) ->
     assert result.portfolio.realized_pnl_today == 15.0
     assert "--side" in calls[0]
     assert "sell" in calls[0]
+
+
+def test_ingest_secondary_prices_merges_hourly_quotes_into_runtime_state(tmp_path: Path) -> None:
+    def fake_http_get(url: str, params: dict[str, str]) -> dict[str, object]:
+        assert url.endswith("/Ticker")
+        pair = params["pair"]
+        if pair == BTC_SYMBOL.ticker:
+            return {
+                "error": [],
+                "result": {
+                    pair: {
+                        "c": ["68000.0", "1"],
+                        "o": "67000.0",
+                        "h": ["68500.0", "68500.0"],
+                        "l": ["66500.0", "66500.0"],
+                        "p": ["67500.0", "67500.0"],
+                    }
+                },
+            }
+        if pair == MATIC_SYMBOL.ticker:
+            return {
+                "error": [],
+                "result": {
+                    pair: {
+                        "c": ["1.05", "1"],
+                        "o": "1.00",
+                        "h": ["1.08", "1.08"],
+                        "l": ["0.98", "0.98"],
+                        "p": ["0.99", "0.99"],
+                    }
+                },
+            }
+        raise AssertionError(f"Unexpected pair requested: {pair}")
+
+    app = build_local_demo_app(
+        base_dir=tmp_path,
+        symbols=[BTC_SYMBOL],
+        secondary_symbols=[MATIC_SYMBOL],
+        http_get=fake_http_get,
+        env={
+            "KRAKEN_API_KEY": "demo-key",
+            "KRAKEN_API_SECRET": "demo-secret",
+        },
+        **_storage_overrides(tmp_path),
+    )
+
+    primary_result = app.ingest_prices()
+    secondary_result = app.ingest_secondary_prices()
+
+    assert primary_result.inserted_count == 1
+    assert secondary_result is not None
+    assert secondary_result.inserted_count == 1
+    assert {quote.symbol_id for quote in app._latest_quotes} == {"btc_usd", "matic_usd"}
 
 
 def test_kraken_paper_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Path) -> None:

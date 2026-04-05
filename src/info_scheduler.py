@@ -38,6 +38,18 @@ class InfoScheduler:
     def register_prices_job(self, func: Callable[[], None], *, interval_seconds: int) -> None:
         self._register_interval_job(func, interval_seconds, job_id="prices_ingestion")
 
+    def register_secondary_prices_job(
+        self,
+        func: Callable[[], None],
+        *,
+        interval_seconds: int,
+    ) -> None:
+        self._register_interval_job(
+            func,
+            interval_seconds,
+            job_id="secondary_prices_ingestion",
+        )
+
     def register_event_detection_job(
         self,
         func: Callable[[], None],

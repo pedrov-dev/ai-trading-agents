@@ -46,7 +46,12 @@ from identity.erc8004_registry import (
 )
 from identity.reputation import ReputationEngine, ReputationSnapshot
 from info_scheduler import InfoScheduler
-from ingestion.prices_config import PRICE_SYMBOLS, PriceSymbol
+from ingestion.prices_config import (
+    PRICE_SYMBOLS,
+    SECONDARY_POLLING_FREQUENCY_SECONDS,
+    SECONDARY_PRICE_SYMBOLS,
+    PriceSymbol,
+)
 from ingestion.prices_ingestion import PriceQuote, PricesIngestionService
 from ingestion.rss_config import RSS_FEED_GROUPS, FeedSource
 from ingestion.rss_ingestion import RSSIngestionService
@@ -703,6 +708,7 @@ class TradingApplication:
         paths: RuntimePaths,
         feed_groups: dict[str, list[FeedSource]],
         symbols: list[PriceSymbol],
+        secondary_symbols: list[PriceSymbol] | None = None,
         parse_feed: Any | None = None,
         http_get: Any | None = None,
         scheduler: InfoScheduler | None = None,
@@ -769,6 +775,15 @@ class TradingApplication:
             symbols=symbols,
             http_get=http_get,
             enrich_volatility_metrics=True,
+        )
+        self._secondary_prices_service = (
+            PricesIngestionService(
+                symbols=secondary_symbols,
+                http_get=http_get,
+                enrich_volatility_metrics=True,
+            )
+            if secondary_symbols
+            else None
         )
         self._detection_service = EventDetectionService(
             detector=RuleBasedEventDetector(),
@@ -1190,6 +1205,7 @@ class TradingApplication:
         feed_group: str = "market_news",
         rss_interval_seconds: int = 120,
         prices_interval_seconds: int = 60,
+        secondary_prices_interval_seconds: int = SECONDARY_POLLING_FREQUENCY_SECONDS,
         detection_interval_seconds: int = 60,
         execution_interval_seconds: int = 60,
     ) -> InfoScheduler:
@@ -1198,6 +1214,9 @@ class TradingApplication:
 
         def _run_prices_job() -> None:
             self.ingest_prices()
+
+        def _run_secondary_prices_job() -> None:
+            self.ingest_secondary_prices()
 
         def _run_detection_job() -> None:
             self.classify_events()
@@ -1213,6 +1232,14 @@ class TradingApplication:
             _run_prices_job,
             interval_seconds=prices_interval_seconds,
         )
+        if (
+            self._secondary_prices_service is not None
+            and secondary_prices_interval_seconds > 0
+        ):
+            self._scheduler.register_secondary_prices_job(
+                _run_secondary_prices_job,
+                interval_seconds=secondary_prices_interval_seconds,
+            )
         self._scheduler.register_event_detection_job(
             _run_detection_job,
             interval_seconds=detection_interval_seconds,
@@ -1231,10 +1258,49 @@ class TradingApplication:
             articles=unique_articles,
         )
 
-    def ingest_prices(self) -> IngestionRunResult:
-        quotes = self._prices_service.fetch_current_prices()
-        self._latest_quotes = quotes
+    @staticmethod
+    def _merge_quotes(
+        existing_quotes: list[PriceQuote],
+        new_quotes: list[PriceQuote],
+    ) -> list[PriceQuote]:
+        merged = {quote.symbol_id: quote for quote in existing_quotes}
+        for quote in new_quotes:
+            merged[quote.symbol_id] = quote
+        return list(merged.values())
+
+    @staticmethod
+    def _combine_price_results(
+        primary: IngestionRunResult,
+        secondary: IngestionRunResult,
+    ) -> IngestionRunResult:
+        return IngestionRunResult(
+            run_id=f"{primary.run_id}+{secondary.run_id}",
+            status="ok" if primary.status == "ok" and secondary.status == "ok" else "error",
+            fetched_count=primary.fetched_count + secondary.fetched_count,
+            inserted_count=primary.inserted_count + secondary.inserted_count,
+            duplicate_count=primary.duplicate_count + secondary.duplicate_count,
+        )
+
+    def _ingest_quotes_with_service(
+        self,
+        service: PricesIngestionService,
+    ) -> IngestionRunResult:
+        quotes = service.fetch_current_prices()
+        self._latest_quotes = self._merge_quotes(self._latest_quotes, quotes)
         return self._prices_pipeline.persist_quotes(quotes=quotes)
+
+    def ingest_prices(self, *, include_secondary: bool = False) -> IngestionRunResult:
+        result = self._ingest_quotes_with_service(self._prices_service)
+        if include_secondary:
+            secondary_result = self.ingest_secondary_prices()
+            if secondary_result is not None:
+                return self._combine_price_results(result, secondary_result)
+        return result
+
+    def ingest_secondary_prices(self) -> IngestionRunResult | None:
+        if self._secondary_prices_service is None:
+            return None
+        return self._ingest_quotes_with_service(self._secondary_prices_service)
 
     def classify_events(self) -> int:
         return self._detection_service.classify_pending_events(
@@ -1244,7 +1310,7 @@ class TradingApplication:
 
     def run_cycle(self, *, feed_group: str = "market_news") -> RuntimeCycleResult:
         rss_result = self.ingest_rss_group(feed_group=feed_group)
-        prices_result = self.ingest_prices()
+        prices_result = self.ingest_prices(include_secondary=True)
         classification_count = self.classify_events()
         return self.execute_trade_cycle(
             rss_result=rss_result,
@@ -1946,6 +2012,7 @@ def build_local_demo_app(
     base_dir: str | Path = ROOT_DIR,
     feed_groups: dict[str, list[FeedSource]] | None = None,
     symbols: list[PriceSymbol] | None = None,
+    secondary_symbols: list[PriceSymbol] | None = None,
     parse_feed: Any | None = None,
     http_get: Any | None = None,
     trading_mode: str = "paper",
@@ -1978,10 +2045,19 @@ def build_local_demo_app(
         max_concurrent_positions=max_positions,
         max_positions_per_asset=max_per_asset,
     )
+    resolved_symbols = symbols or PRICE_SYMBOLS
+    resolved_secondary_symbols = (
+        secondary_symbols
+        if secondary_symbols is not None
+        else SECONDARY_PRICE_SYMBOLS
+        if symbols is None
+        else None
+    )
     return TradingApplication(
         paths=paths,
         feed_groups=feed_groups or RSS_FEED_GROUPS,
-        symbols=symbols or PRICE_SYMBOLS,
+        symbols=resolved_symbols,
+        secondary_symbols=resolved_secondary_symbols,
         parse_feed=parse_feed,
         http_get=http_get,
         identity_registry=build_identity_registry(
@@ -2287,6 +2363,7 @@ def run_scheduler_service(
     feed_group: str = "market_news",
     rss_interval_seconds: int = 120,
     prices_interval_seconds: int = 60,
+    secondary_prices_interval_seconds: int = SECONDARY_POLLING_FREQUENCY_SECONDS,
     detection_interval_seconds: int = 60,
     execution_interval_seconds: int = 60,
 ) -> None:
@@ -2294,6 +2371,7 @@ def run_scheduler_service(
         feed_group=feed_group,
         rss_interval_seconds=rss_interval_seconds,
         prices_interval_seconds=prices_interval_seconds,
+        secondary_prices_interval_seconds=secondary_prices_interval_seconds,
         detection_interval_seconds=detection_interval_seconds,
         execution_interval_seconds=execution_interval_seconds,
     )
@@ -2329,6 +2407,7 @@ def run_scheduler_service(
                 "feed_group": feed_group,
                 "rss_interval_seconds": rss_interval_seconds,
                 "prices_interval_seconds": prices_interval_seconds,
+                "secondary_prices_interval_seconds": secondary_prices_interval_seconds,
                 "detection_interval_seconds": detection_interval_seconds,
                 "execution_interval_seconds": execution_interval_seconds,
             },
@@ -2445,7 +2524,18 @@ def _build_cli_parser() -> argparse.ArgumentParser:
         "--prices-interval-seconds",
         type=int,
         default=int(os.environ.get("PRICES_INTERVAL_SECONDS", "60")),
-        help="Scheduler interval for price ingestion jobs.",
+        help="Scheduler interval for core Tier A price ingestion jobs.",
+    )
+    parser.add_argument(
+        "--secondary-prices-interval-seconds",
+        type=int,
+        default=int(
+            os.environ.get(
+                "SECONDARY_PRICES_INTERVAL_SECONDS",
+                str(SECONDARY_POLLING_FREQUENCY_SECONDS),
+            )
+        ),
+        help="Scheduler interval for Tier B event-driven price ingestion jobs.",
     )
     parser.add_argument(
         "--detection-interval-seconds",
@@ -2531,6 +2621,7 @@ def main() -> int:
                 feed_group=args.feed_group,
                 rss_interval_seconds=args.rss_interval_seconds,
                 prices_interval_seconds=args.prices_interval_seconds,
+                secondary_prices_interval_seconds=args.secondary_prices_interval_seconds,
                 detection_interval_seconds=args.detection_interval_seconds,
                 execution_interval_seconds=args.execution_interval_seconds,
             )

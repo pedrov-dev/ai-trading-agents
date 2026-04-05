@@ -1,9 +1,41 @@
 from datetime import UTC, date, datetime, timedelta
 
-from ingestion.prices_config import PRICE_SYMBOLS
+from ingestion.prices_config import ALL_PRICE_SYMBOLS, PRICE_SYMBOLS, SECONDARY_PRICE_SYMBOLS
 from ingestion.prices_ingestion import PricesIngestionService
 
 BTC_SYMBOL = next(symbol for symbol in PRICE_SYMBOLS if symbol.symbol_id == "btc_usd")
+
+
+def test_price_symbol_universe_covers_core_and_secondary_tiers() -> None:
+    assert [symbol.symbol_id for symbol in PRICE_SYMBOLS] == [
+        "btc_usd",
+        "eth_usd",
+        "sol_usd",
+        "xrp_usd",
+        "bnb_usd",
+        "doge_usd",
+        "ada_usd",
+        "avax_usd",
+        "link_usd",
+        "ton_usd",
+    ]
+    assert [symbol.symbol_id for symbol in SECONDARY_PRICE_SYMBOLS] == [
+        "matic_usd",
+        "dot_usd",
+        "ltc_usd",
+        "bch_usd",
+        "uni_usd",
+        "aave_usd",
+        "arb_usd",
+        "op_usd",
+        "render_usd",
+        "inj_usd",
+        "near_usd",
+        "atom_usd",
+        "apt_usd",
+        "sui_usd",
+    ]
+    assert len(ALL_PRICE_SYMBOLS) == len(PRICE_SYMBOLS) + len(SECONDARY_PRICE_SYMBOLS)
 
 
 def test_fetch_current_prices_parses_kraken_ticker_payload() -> None:

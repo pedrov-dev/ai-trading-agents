@@ -60,9 +60,54 @@ _SYMBOL_KEYWORDS: dict[str, tuple[str, ...]] = {
     "eth_usd": ("eth", "ether", "ethereum"),
     "sol_usd": ("sol", "solana"),
     "xrp_usd": ("xrp", "ripple"),
+    "bnb_usd": ("bnb", "binance coin", "binance"),
+    "doge_usd": ("doge", "dogecoin"),
+    "ada_usd": ("ada", "cardano"),
+    "avax_usd": ("avax", "avalanche"),
+    "link_usd": ("link", "chainlink"),
+    "ton_usd": ("toncoin", "telegram", "the open network", "ton network"),
+    "matic_usd": ("matic", "polygon", "polygon pos"),
+    "dot_usd": ("dot", "polkadot"),
+    "ltc_usd": ("ltc", "litecoin"),
+    "bch_usd": ("bch", "bitcoin cash"),
+    "uni_usd": ("uniswap",),
+    "aave_usd": ("aave",),
+    "arb_usd": ("arbitrum",),
+    "op_usd": ("optimism", "op mainnet"),
+    "render_usd": ("render", "rndr"),
+    "inj_usd": ("injective",),
+    "near_usd": ("near protocol", "near"),
+    "atom_usd": ("cosmos", "atom"),
+    "apt_usd": ("aptos",),
+    "sui_usd": ("sui",),
 }
 
-_PREFERRED_SYMBOLS: tuple[str, ...] = ("btc_usd", "eth_usd", "sol_usd", "xrp_usd")
+_PREFERRED_SYMBOLS: tuple[str, ...] = (
+    "btc_usd",
+    "eth_usd",
+    "sol_usd",
+    "xrp_usd",
+    "bnb_usd",
+    "doge_usd",
+    "ada_usd",
+    "avax_usd",
+    "link_usd",
+    "ton_usd",
+    "matic_usd",
+    "dot_usd",
+    "ltc_usd",
+    "bch_usd",
+    "uni_usd",
+    "aave_usd",
+    "arb_usd",
+    "op_usd",
+    "render_usd",
+    "inj_usd",
+    "near_usd",
+    "atom_usd",
+    "apt_usd",
+    "sui_usd",
+)
 
 _REASONING_STOPWORDS: set[str] = {
     "a",
@@ -271,7 +316,10 @@ def select_quote_for_event(
     event_text = f"{event.event_type} {event.rule_name} {event.matched_text or ''}".lower()
 
     for symbol_id, keywords in _SYMBOL_KEYWORDS.items():
-        if any(keyword in event_text for keyword in keywords) and symbol_id in quote_by_symbol:
+        matches_symbol = any(
+            _event_mentions_keyword(event_text, keyword) for keyword in keywords
+        )
+        if matches_symbol and symbol_id in quote_by_symbol:
             return quote_by_symbol[symbol_id]
 
     for symbol_id in _PREFERRED_SYMBOLS:
@@ -279,6 +327,16 @@ def select_quote_for_event(
             return quote_by_symbol[symbol_id]
 
     return price_quotes[0]
+
+
+def _event_mentions_keyword(event_text: str, keyword: str) -> bool:
+    normalized_keyword = keyword.strip().lower()
+    if not normalized_keyword:
+        return False
+    if " " in normalized_keyword or "-" in normalized_keyword or "/" in normalized_keyword:
+        return normalized_keyword in event_text
+    pattern = rf"(?<![a-z0-9]){re.escape(normalized_keyword)}(?![a-z0-9])"
+    return re.search(pattern, event_text) is not None
 
 
 def build_signal(
