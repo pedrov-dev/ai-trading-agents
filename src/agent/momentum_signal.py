@@ -8,6 +8,7 @@ from ingestion.prices_ingestion import PriceQuote
 
 TradeSide = Literal["buy", "sell"]
 DEFAULT_PRICE_CONFIRMATION_THRESHOLD = 0.001
+MOMENTUM_SIGNAL_VERSION = "v1"
 
 
 def price_momentum(quote: PriceQuote) -> float:
@@ -69,6 +70,7 @@ def price_confirmation_state(
 
 __all__ = [
     "DEFAULT_PRICE_CONFIRMATION_THRESHOLD",
+    "MOMENTUM_SIGNAL_VERSION",
     "price_confirmation_state",
     "price_momentum",
 ]

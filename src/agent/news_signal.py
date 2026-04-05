@@ -12,6 +12,9 @@ from ingestion.prices_ingestion import PriceQuote
 
 TradeSide = Literal["buy", "sell"]
 
+NEWS_SIGNAL_PRICE_ONLY_VERSION = "v2"
+NEWS_SIGNAL_VERSION = "v3"
+
 _EVENT_BIAS: dict[str, float] = {
     "ETF_APPROVAL": 0.95,
     "TOKEN_LISTING": 0.75,
@@ -253,6 +256,8 @@ def _event_mentions_keyword(event_text: str, keyword: str) -> bool:
 
 __all__ = [
     "TradeSide",
+    "NEWS_SIGNAL_PRICE_ONLY_VERSION",
+    "NEWS_SIGNAL_VERSION",
     "build_thesis_fingerprint",
     "event_bias_for",
     "extract_thesis_tokens",

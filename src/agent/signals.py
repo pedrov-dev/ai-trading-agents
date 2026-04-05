@@ -28,12 +28,17 @@ from agent.event_signal import (
 from agent.momentum_signal import (
     DEFAULT_PRICE_CONFIRMATION_THRESHOLD as _DEFAULT_PRICE_CONFIRMATION_THRESHOLD,
 )
+from agent.momentum_signal import MOMENTUM_SIGNAL_VERSION as _MOMENTUM_SIGNAL_VERSION
 from agent.momentum_signal import (
     price_confirmation_state as _price_confirmation_state,
 )
 from agent.momentum_signal import (
     price_momentum as _price_momentum,
 )
+from agent.news_signal import (
+    NEWS_SIGNAL_PRICE_ONLY_VERSION as _NEWS_SIGNAL_PRICE_ONLY_VERSION,
+)
+from agent.news_signal import NEWS_SIGNAL_VERSION as _NEWS_SIGNAL_VERSION
 from agent.news_signal import (
     build_thesis_fingerprint as _build_thesis_fingerprint,
 )
@@ -49,6 +54,9 @@ from agent.news_signal import (
 )
 from agent.volume_breakout_signal import (
     DEFAULT_VOLUME_SPIKE_THRESHOLD as _DEFAULT_VOLUME_SPIKE_THRESHOLD,
+)
+from agent.volume_breakout_signal import (
+    VOLUME_BREAKOUT_SIGNAL_VERSION as _VOLUME_BREAKOUT_SIGNAL_VERSION,
 )
 from agent.volume_breakout_signal import (
     volume_confirmation_state as _volume_confirmation_state,
@@ -399,6 +407,15 @@ def build_signal(
     rationale = tuple(rationale_items)
 
     event_group = event_performance_group(event.event_type)
+    signal_family = _resolve_signal_family(
+        event_type=event.event_type,
+        event_group=event_group,
+    )
+    feature_set = _resolve_feature_set(volume_unavailable=volume_unavailable)
+    signal_version = _resolve_signal_version(
+        signal_family=signal_family,
+        feature_set=feature_set,
+    )
     thesis_tokens = _extract_thesis_tokens(event=event, symbol_id=quote.symbol_id)
     return Signal(
         signal_id=_build_signal_id(
@@ -407,13 +424,10 @@ def build_signal(
             symbol_id=quote.symbol_id,
             generated_at=generated_at,
         ),
-        signal_family=_resolve_signal_family(
-            event_type=event.event_type,
-            event_group=event_group,
-        ),
-        signal_version="v1",
+        signal_family=signal_family,
+        signal_version=signal_version,
         model_version="rule-based",
-        feature_set=_resolve_feature_set(volume_unavailable=volume_unavailable),
+        feature_set=feature_set,
         asset=_infer_asset(quote.symbol_id),
         direction=_resolve_direction(side),
         raw_event_id=event.raw_event_id,
@@ -566,6 +580,18 @@ def _resolve_feature_set(*, volume_unavailable: bool) -> str:
     if not volume_unavailable:
         components.append("volume")
     return "+".join(components)
+
+
+def _resolve_signal_version(*, signal_family: str, feature_set: str) -> str:
+    if signal_family == "news_sentiment":
+        if "volume" in feature_set:
+            return _NEWS_SIGNAL_VERSION
+        return _NEWS_SIGNAL_PRICE_ONLY_VERSION
+    if signal_family == "volume_breakout":
+        return _VOLUME_BREAKOUT_SIGNAL_VERSION
+    if signal_family == "momentum":
+        return _MOMENTUM_SIGNAL_VERSION
+    return "v1"
 
 
 def _infer_asset(value: str) -> str:

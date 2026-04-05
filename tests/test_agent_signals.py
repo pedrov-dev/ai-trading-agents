@@ -90,7 +90,62 @@ def test_build_trade_intent_preserves_event_attribution() -> None:
     assert intent.event_type == "MACRO_NEWS"
     assert intent.event_group == "macro_news"
     assert intent.signal_id == signal.signal_id
+    assert intent.signal_family == signal.signal_family
+    assert intent.signal_version == signal.signal_version
     assert intent.notional_usd == 500.0
+
+
+def test_build_signal_assigns_deliberate_versions_for_concrete_producers() -> None:
+    news_event = DetectedEvent(
+        raw_event_id="evt-news-version",
+        event_type="ETF_APPROVAL",
+        rule_name="etf_approval",
+        confidence=0.93,
+        matched_text="bitcoin etf approval",
+        detected_at=datetime(2026, 4, 3, tzinfo=UTC),
+    )
+    news_quote = PriceQuote(
+        symbol_id="btc_usd",
+        current=68_000.0,
+        open=66_500.0,
+        high=68_400.0,
+        low=66_200.0,
+        prev_close=66_100.0,
+        timestamp=1712100000,
+        asset_class="spot",
+        session_volume=1_250_000.0,
+        volume_ratio=2.1,
+    )
+    breakout_event = DetectedEvent(
+        raw_event_id="evt-breakout-version",
+        event_type="TECHNICAL_BREAKOUT",
+        rule_name="technical_breakout",
+        confidence=0.79,
+        matched_text="breakout with expanding volume",
+        detected_at=datetime(2026, 4, 3, tzinfo=UTC),
+    )
+    breakout_quote = PriceQuote(
+        symbol_id="eth_usd",
+        current=3_250.0,
+        open=3_100.0,
+        high=3_270.0,
+        low=3_050.0,
+        prev_close=3_040.0,
+        timestamp=1712100000,
+        asset_class="spot",
+        session_volume=875_000.0,
+        volume_ratio=1.9,
+    )
+
+    news_signal = build_signal(event=news_event, quote=news_quote)
+    breakout_signal = build_signal(event=breakout_event, quote=breakout_quote)
+
+    assert news_signal.signal_family == "news_sentiment"
+    assert news_signal.signal_version == "v3"
+    assert news_signal.feature_set == "news+price+volume"
+
+    assert breakout_signal.signal_family == "volume_breakout"
+    assert breakout_signal.signal_version == "v1"
 
 
 def test_build_signal_weakens_when_volatility_is_low() -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from ingestion.prices_ingestion import PriceQuote
 
 DEFAULT_VOLUME_SPIKE_THRESHOLD = 1.5
+VOLUME_BREAKOUT_SIGNAL_VERSION = "v1"
 
 
 def volume_confirmation_state(
@@ -45,4 +46,8 @@ def volume_confirmation_state(
     )
 
 
-__all__ = ["DEFAULT_VOLUME_SPIKE_THRESHOLD", "volume_confirmation_state"]
+__all__ = [
+    "DEFAULT_VOLUME_SPIKE_THRESHOLD",
+    "VOLUME_BREAKOUT_SIGNAL_VERSION",
+    "volume_confirmation_state",
+]
