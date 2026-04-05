@@ -12,6 +12,7 @@ from detection.event_types import event_performance_group
 from ingestion.prices_ingestion import PriceQuote
 
 TradeSide = Literal["buy", "sell"]
+MoveDirection = Literal["up", "down", "flat"]
 
 _EVENT_BIAS: dict[str, float] = {
     "ETF_APPROVAL": 0.95,
@@ -70,6 +71,8 @@ class TradeIntent:
     current_price: float
     score: float
     rationale: tuple[str, ...]
+    confidence_score: float | None = None
+    expected_move: MoveDirection | None = None
     generated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     signal_id: str | None = None
     raw_event_id: str | None = None
@@ -79,6 +82,18 @@ class TradeIntent:
     max_hold_minutes: int | None = None
     exit_due_at: datetime | None = None
     position_id: str | None = None
+
+    def __post_init__(self) -> None:
+        resolved_confidence = self.score if self.confidence_score is None else self.confidence_score
+        if not 0.0 <= resolved_confidence <= 1.0:
+            raise ValueError("Trade intent confidence_score must be between 0.0 and 1.0.")
+
+        resolved_expected_move = self.expected_move or ("up" if self.side == "buy" else "down")
+        if resolved_expected_move not in {"up", "down", "flat"}:
+            raise ValueError("Trade intent expected_move must be one of: up, down, flat.")
+
+        object.__setattr__(self, "confidence_score", round(resolved_confidence, 4))
+        object.__setattr__(self, "expected_move", resolved_expected_move)
 
 
 def infer_trade_side(event_type: str) -> TradeSide | None:
@@ -186,6 +201,8 @@ def build_trade_intent(
         current_price=signal.current_price,
         score=signal.score,
         rationale=rationale,
+        confidence_score=signal.score,
+        expected_move="up" if signal.side == "buy" else "down",
         generated_at=signal.generated_at,
         signal_id=resolved_signal_id,
         raw_event_id=signal.raw_event_id,

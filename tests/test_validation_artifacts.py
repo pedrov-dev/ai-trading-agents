@@ -81,6 +81,8 @@ def test_trade_intent_artifact_is_serializable_and_stable() -> None:
     assert artifact.artifact_id == duplicate.artifact_id
     assert payload["agent_id"] == "agent-123"
     assert payload["payload"]["symbol_id"] == "btc_usd"
+    assert payload["payload"]["confidence_score"] == 0.91
+    assert payload["payload"]["expected_move"] == "up"
     assert payload["payload"]["rationale"] == ["ETF approval momentum", "Risk checks cleared"]
 
 

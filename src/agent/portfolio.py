@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 
+from agent.signals import MoveDirection
+
 PositionSide = Literal["long", "short"]
 
 
@@ -17,6 +19,8 @@ class Position:
     side: PositionSide
     quantity: float
     entry_price: float
+    confidence_score: float | None = None
+    expected_move: MoveDirection | None = None
     opened_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     position_id: str | None = None
     source_signal_id: str | None = None
@@ -122,11 +126,14 @@ class LocalPortfolioStateProvider:
         exit_horizon_label: str | None = None,
         max_hold_minutes: int | None = None,
         exit_due_at: datetime | None = None,
+        confidence_score: float | None = None,
+        expected_move: MoveDirection | None = None,
     ) -> PortfolioSnapshot:
         if quantity <= 0 or price <= 0:
             return self._snapshot
 
         observed_at = filled_at or datetime.now(UTC)
+        resolved_expected_move = expected_move or ("up" if side == "buy" else "down")
         notional = round(quantity * price, 2)
         next_cash = (
             self._snapshot.cash_usd - notional
@@ -164,6 +171,8 @@ class LocalPortfolioStateProvider:
                 exit_horizon_label=exit_horizon_label,
                 max_hold_minutes=max_hold_minutes,
                 exit_due_at=exit_due_at,
+                confidence_score=confidence_score,
+                expected_move=resolved_expected_move,
             )
         else:
             existing_signed_quantity = _signed_quantity(existing)
@@ -188,6 +197,13 @@ class LocalPortfolioStateProvider:
                     exit_horizon_label=existing.exit_horizon_label,
                     max_hold_minutes=existing.max_hold_minutes,
                     exit_due_at=existing.exit_due_at,
+                    confidence_score=_merge_confidence_scores(
+                        existing_confidence=existing.confidence_score,
+                        existing_quantity=abs(existing_signed_quantity),
+                        added_confidence=confidence_score,
+                        added_quantity=abs(fill_signed_quantity),
+                    ),
+                    expected_move=existing.expected_move or resolved_expected_move,
                 )
             else:
                 closed_quantity = min(
@@ -218,6 +234,8 @@ class LocalPortfolioStateProvider:
                             exit_horizon_label=existing.exit_horizon_label,
                             max_hold_minutes=existing.max_hold_minutes,
                             exit_due_at=existing.exit_due_at,
+                            confidence_score=existing.confidence_score,
+                            expected_move=existing.expected_move,
                         )
                     else:
                         updated_position = _build_position(
@@ -233,6 +251,8 @@ class LocalPortfolioStateProvider:
                             exit_horizon_label=exit_horizon_label,
                             max_hold_minutes=max_hold_minutes,
                             exit_due_at=exit_due_at,
+                            confidence_score=confidence_score,
+                            expected_move=resolved_expected_move,
                         )
 
         updated_positions = remaining_positions + ((updated_position,) if updated_position else ())
@@ -297,6 +317,8 @@ def _build_position(
     exit_horizon_label: str | None = None,
     max_hold_minutes: int | None = None,
     exit_due_at: datetime | None = None,
+    confidence_score: float | None = None,
+    expected_move: MoveDirection | None = None,
 ) -> Position:
     resolved_exit_due_at = exit_due_at
     if resolved_exit_due_at is None and max_hold_minutes is not None and max_hold_minutes > 0:
@@ -318,6 +340,8 @@ def _build_position(
         exit_horizon_label=exit_horizon_label,
         max_hold_minutes=max_hold_minutes,
         exit_due_at=resolved_exit_due_at,
+        confidence_score=confidence_score,
+        expected_move=expected_move,
     )
 
 
@@ -331,3 +355,26 @@ def _calculate_realized_pnl(
     if position.side == "short":
         return (position.entry_price - exit_price) * quantity
     return (exit_price - position.entry_price) * quantity
+
+
+def _merge_confidence_scores(
+    *,
+    existing_confidence: float | None,
+    existing_quantity: float,
+    added_confidence: float | None,
+    added_quantity: float,
+) -> float | None:
+    if existing_confidence is None:
+        return added_confidence
+    if added_confidence is None:
+        return existing_confidence
+
+    total_quantity = existing_quantity + added_quantity
+    if total_quantity <= 0:
+        return existing_confidence
+
+    return round(
+        ((existing_confidence * existing_quantity) + (added_confidence * added_quantity))
+        / total_quantity,
+        4,
+    )

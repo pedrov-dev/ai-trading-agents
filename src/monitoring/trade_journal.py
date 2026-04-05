@@ -15,6 +15,7 @@ from agent.portfolio import (
     PortfolioSnapshot,
     Position,
 )
+from agent.signals import MoveDirection
 from detection.event_types import event_performance_group
 from execution.orders import ExecutionResult
 from storage.local_runtime import JsonlFileStore
@@ -33,6 +34,10 @@ class TradeJournalEntry:
     event_type: str
     quantity: float
     price: float
+    confidence_score: float | None = None
+    expected_move: MoveDirection | None = None
+    actual_move: MoveDirection | None = None
+    prediction_correct: bool | None = None
     realized_pnl_usd: float = 0.0
     position_side: str | None = None
     position_quantity: float = 0.0
@@ -76,6 +81,26 @@ class TradeJournalEntry:
             after_portfolio.realized_pnl_today - before_portfolio.realized_pnl_today,
             2,
         )
+        journal_event_type = _derive_event_type(
+            before_position=before_position,
+            after_position=after_position,
+        )
+        expected_move = (
+            before_position.expected_move
+            if before_position is not None and before_position.expected_move is not None
+            else ("up" if before_position is not None and before_position.side == "long" else "down")
+        )
+        confidence_score = (
+            before_position.confidence_score
+            if before_position is not None and before_position.confidence_score is not None
+            else round(execution_result.request.score, 4)
+        )
+        actual_move = (
+            _derive_actual_move(before_position=before_position, exit_price=fill.average_price)
+            if journal_event_type in _CLOSE_EVENT_TYPES
+            else None
+        )
+        prediction_correct = expected_move == actual_move if actual_move is not None else None
         return cls(
             entry_id=(
                 f"{execution_result.request.client_order_id}:"
@@ -84,12 +109,13 @@ class TradeJournalEntry:
             recorded_at=fill.filled_at,
             symbol_id=execution_result.request.symbol_id,
             side=str(execution_result.request.side),
-            event_type=_derive_event_type(
-                before_position=before_position,
-                after_position=after_position,
-            ),
+            event_type=journal_event_type,
             quantity=round(fill.filled_quantity, 8),
             price=round(fill.average_price, 8),
+            confidence_score=confidence_score,
+            expected_move=expected_move,
+            actual_move=actual_move,
+            prediction_correct=prediction_correct,
             realized_pnl_usd=realized_change,
             position_side=after_position.side if after_position is not None else None,
             position_quantity=(
@@ -158,6 +184,18 @@ class TradeJournalEntry:
             event_type=str(payload.get("event_type", "entry")),
             quantity=float(payload.get("quantity", 0.0)),
             price=float(payload.get("price", 0.0)),
+            confidence_score=(
+                float(payload["confidence_score"])
+                if payload.get("confidence_score") is not None
+                else None
+            ),
+            expected_move=cast_move_direction(payload.get("expected_move")),
+            actual_move=cast_move_direction(payload.get("actual_move")),
+            prediction_correct=(
+                bool(payload["prediction_correct"])
+                if payload.get("prediction_correct") is not None
+                else None
+            ),
             realized_pnl_usd=float(payload.get("realized_pnl_usd", 0.0)),
             position_side=str(position_side) if position_side is not None else None,
             position_quantity=float(payload.get("position_quantity", 0.0)),
@@ -202,6 +240,10 @@ class TradeJournalEntry:
             "event_type": self.event_type,
             "quantity": self.quantity,
             "price": self.price,
+            "confidence_score": self.confidence_score,
+            "expected_move": self.expected_move,
+            "actual_move": self.actual_move,
+            "prediction_correct": self.prediction_correct,
             "realized_pnl_usd": self.realized_pnl_usd,
             "position_side": self.position_side,
             "position_quantity": self.position_quantity,
@@ -324,6 +366,8 @@ class LocalTradeJournal:
                 exit_horizon_label=entry.exit_horizon_label,
                 max_hold_minutes=entry.max_hold_minutes,
                 exit_due_at=entry.exit_due_at,
+                confidence_score=entry.confidence_score,
+                expected_move=entry.expected_move,
             )
         return snapshot
 
@@ -499,3 +543,23 @@ def _parse_datetime(value: Any) -> datetime:
     if isinstance(value, str):
         return datetime.fromisoformat(value)
     return datetime.now(UTC)
+
+
+def _derive_actual_move(
+    *,
+    before_position: Position | None,
+    exit_price: float,
+) -> MoveDirection | None:
+    if before_position is None:
+        return None
+    if exit_price > before_position.entry_price:
+        return "up"
+    if exit_price < before_position.entry_price:
+        return "down"
+    return "flat"
+
+
+def cast_move_direction(value: Any) -> MoveDirection | None:
+    if value in {"up", "down", "flat"}:
+        return value
+    return None

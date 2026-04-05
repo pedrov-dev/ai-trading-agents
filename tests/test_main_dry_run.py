@@ -328,6 +328,86 @@ def test_kraken_paper_app_records_signal_outcomes_by_horizon_on_exit(tmp_path: P
     assert any("sell" in command for command in calls)
 
 
+def test_run_summary_includes_confidence_calibration_for_resolved_trades(tmp_path: Path) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...], timeout_seconds: int) -> CommandRunResult:
+        assert timeout_seconds == 15
+        calls.append(command)
+        return CommandRunResult(
+            exit_code=0,
+            stdout='{"status": "validated", "validated": true}',
+            stderr="",
+        )
+
+    app = build_local_demo_app(
+        base_dir=tmp_path,
+        trading_mode="paper",
+        execution_runner=fake_runner,
+        env={
+            "KRAKEN_API_KEY": "demo-key",
+            "KRAKEN_API_SECRET": "demo-secret",
+        },
+        execution_config=KrakenCLIConfig(
+            executable="kraken-cli",
+            dry_run=False,
+            live_enabled=True,
+            validate_only=True,
+            audit_log_path=tmp_path / "artifacts" / "orders_audit.jsonl",
+        ),
+        **_storage_overrides(tmp_path),
+    )
+    app._portfolio_provider.record_fill(
+        symbol_id="btc_usd",
+        side="buy",
+        quantity=0.01,
+        price=50_000.0,
+        filled_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC),
+        position_id="pos-30m",
+        source_signal_id="signal-456",
+        raw_event_id="evt-456",
+        event_type="ETF_APPROVAL",
+        exit_horizon_label="30m",
+        max_hold_minutes=30,
+        exit_due_at=datetime(2026, 4, 3, 12, 30, tzinfo=UTC),
+        confidence_score=0.92,
+        expected_move="up",
+    )
+    app._latest_quotes = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=51_500.0,
+            open=50_100.0,
+            high=51_600.0,
+            low=49_900.0,
+            prev_close=50_050.0,
+            timestamp=1712100000,
+            asset_class="spot",
+        )
+    ]
+
+    result = app.execute_trade_cycle(classification_count=0)
+    summary = json.loads((tmp_path / "artifacts" / "run_summary.json").read_text(encoding="utf-8"))
+    journal_rows = [
+        json.loads(line)
+        for line in (tmp_path / "artifacts" / "trading_journal.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.strip()
+    ]
+
+    assert len(result.trade_intents) == 1
+    assert len(result.execution_results) == 1
+    assert result.calibration_summary.resolved_prediction_count == 1
+    assert result.calibration_summary.hit_rate == 1.0
+    assert summary["calibration_summary"]["resolved_prediction_count"] == 1
+    assert summary["calibration_summary"]["brier_score"] >= 0.0
+    assert journal_rows[-1]["expected_move"] == "up"
+    assert journal_rows[-1]["actual_move"] == "up"
+    assert journal_rows[-1]["prediction_correct"] is True
+    assert any("sell" in command for command in calls)
+
+
 def test_run_cycle_writes_incremental_action_log_and_summary_state(tmp_path: Path) -> None:
     def fake_parse_feed(_url: str) -> dict[str, object]:
         return {

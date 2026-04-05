@@ -87,6 +87,8 @@ class ValidationArtifact:
             "quantity": round(intent.quantity, 8),
             "current_price": intent.current_price,
             "score": intent.score,
+            "confidence_score": intent.confidence_score,
+            "expected_move": intent.expected_move,
             "rationale": list(intent.rationale),
             "generated_at": intent.generated_at.isoformat(),
             "signal_id": intent.signal_id,
@@ -99,6 +101,11 @@ class ValidationArtifact:
         }
         evidence = (
             ArtifactEvidence(name="score", value=intent.score, unit="normalized"),
+            ArtifactEvidence(
+                name="confidence_score",
+                value=intent.confidence_score,
+                unit="normalized",
+            ),
             ArtifactEvidence(name="notional_usd", value=round(intent.notional_usd, 2), unit="usd"),
             ArtifactEvidence(name="quantity", value=round(intent.quantity, 8), unit="asset"),
         )

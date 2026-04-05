@@ -214,6 +214,8 @@ class SimpleEventDrivenStrategy:
                     current_price=quote.current,
                     score=1.0,
                     rationale=tuple(rationale),
+                    confidence_score=position.confidence_score,
+                    expected_move=position.expected_move,
                     generated_at=checked_at,
                     signal_id=position.source_signal_id,
                     raw_event_id=position.raw_event_id,

@@ -26,7 +26,7 @@ A super basic local dashboard is available for demos and judging:
 streamlit run src/ui/dashboard.py
 ```
 
-It shows portfolio/performance metrics from `artifacts/run_summary.json`, lets you trigger preflight checks plus one-shot/scheduler runs, and auto-refreshes a couple of times per minute.
+It shows portfolio/performance metrics from `artifacts/run_summary.json`, including confidence calibration stats such as resolved predictions, Brier score, and hit rate by confidence bucket. It also lets you trigger preflight checks plus one-shot/scheduler runs, and auto-refreshes a couple of times per minute.
 
 ## What the Kraken runtime does
 
@@ -44,6 +44,8 @@ After a run, inspect:
 - `artifacts/validation_artifacts.jsonl`
 - `artifacts/validation_checkpoints.jsonl`
 - `artifacts/run_summary.json`
+
+`run_summary.json` now also includes a `calibration_summary` block derived from resolved trades, with confidence buckets, hit rates, and the aggregate Brier score.
 
 ## Optional ERC-8004 / Sepolia identity layer
 

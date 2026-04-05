@@ -24,6 +24,8 @@ def test_local_trade_journal_appends_and_summarizes_position_lifecycle(tmp_path)
                 event_type="entry",
                 quantity=0.01,
                 price=50_000.0,
+                confidence_score=0.91,
+                expected_move="up",
                 realized_pnl_usd=0.0,
                 position_side="long",
                 position_quantity=0.01,
@@ -40,6 +42,10 @@ def test_local_trade_journal_appends_and_summarizes_position_lifecycle(tmp_path)
                 event_type="full_exit",
                 quantity=0.01,
                 price=52_000.0,
+                confidence_score=0.91,
+                expected_move="up",
+                actual_move="up",
+                prediction_correct=True,
                 realized_pnl_usd=20.0,
                 position_side=None,
                 position_quantity=0.0,
@@ -56,6 +62,7 @@ def test_local_trade_journal_appends_and_summarizes_position_lifecycle(tmp_path)
     assert len(lines) == 2
     assert json.loads(lines[0])["event_type"] == "entry"
     assert json.loads(lines[0])["source_event_type"] == "ETF_APPROVAL"
+    assert json.loads(lines[1])["actual_move"] == "up"
 
     summary = build_trade_journal_summary_from_file(journal_path)
 

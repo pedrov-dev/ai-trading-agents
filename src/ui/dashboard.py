@@ -199,6 +199,8 @@ def build_trade_intent_rows(payload: Mapping[str, Any] | None) -> list[dict[str,
                 "symbol_id": str(item.get("symbol_id") or "-"),
                 "side": str(item.get("side") or "-"),
                 "score": _as_float(item.get("score")),
+                "confidence_score": _as_float(item.get("confidence_score", item.get("score"))),
+                "expected_move": str(item.get("expected_move") or "-"),
                 "signal_id": str(item.get("signal_id") or ""),
                 "exit_horizon": str(item.get("exit_horizon_label") or ""),
                 "notional_usd": _as_float(item.get("notional_usd")),
@@ -293,6 +295,32 @@ def build_signal_discovery_rows(payload: Mapping[str, Any] | None) -> list[dict[
             }
         )
     return sorted(rows, key=lambda row: row["sample_count"], reverse=True)
+
+
+def build_calibration_rows(payload: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Flatten calibration buckets into dashboard rows."""
+    if payload is None:
+        return []
+    calibration_summary = payload.get("calibration_summary")
+    if not isinstance(calibration_summary, Mapping):
+        return []
+    buckets = calibration_summary.get("buckets")
+    if not isinstance(buckets, Sequence):
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for item in buckets:
+        if not isinstance(item, Mapping):
+            continue
+        rows.append(
+            {
+                "bucket": str(item.get("bucket_label") or "-"),
+                "average_confidence": _as_float(item.get("average_confidence")),
+                "hit_rate": _as_float(item.get("hit_rate")),
+                "sample_count": int(_as_float(item.get("sample_count"))),
+            }
+        )
+    return rows
 
 
 def build_activity_rows(activity_records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -470,6 +498,7 @@ def render_dashboard() -> None:
     trade_intent_rows = build_trade_intent_rows(latest_payload)
     execution_rows = build_execution_rows(latest_payload)
     signal_discovery_rows = build_signal_discovery_rows(latest_payload)
+    calibration_rows = build_calibration_rows(latest_payload)
 
     _render_kpis(streamlit, latest_payload)
 
@@ -529,6 +558,12 @@ def render_dashboard() -> None:
             streamlit.dataframe(audit_records[-10:], width='stretch')
         else:
             streamlit.write("No audit events written yet.")
+
+        streamlit.subheader("Confidence calibration")
+        if calibration_rows:
+            streamlit.dataframe(calibration_rows, width='stretch')
+        else:
+            streamlit.write("No resolved predictions available yet.")
 
     streamlit.subheader("Runtime details")
     runtime_details = {
@@ -657,11 +692,13 @@ def _render_kpis(streamlit: Any, latest_payload: Mapping[str, Any] | None) -> No
     pnl_snapshot = latest_payload.get("pnl_snapshot")
     drawdown_snapshot = latest_payload.get("drawdown_snapshot")
     journal_summary = latest_payload.get("journal_summary")
+    calibration_summary = latest_payload.get("calibration_summary")
 
     portfolio_map = portfolio if isinstance(portfolio, Mapping) else {}
     pnl_map = pnl_snapshot if isinstance(pnl_snapshot, Mapping) else {}
     drawdown_map = drawdown_snapshot if isinstance(drawdown_snapshot, Mapping) else {}
     journal_map = journal_summary if isinstance(journal_summary, Mapping) else {}
+    calibration_map = calibration_summary if isinstance(calibration_summary, Mapping) else {}
 
     first_row = streamlit.columns(4)
     first_row[0].metric("Total equity", _format_usd(portfolio_map.get("total_equity")))
@@ -682,6 +719,24 @@ def _render_kpis(streamlit: Any, latest_payload: Mapping[str, Any] | None) -> No
     second_row[3].metric(
         "Closed trades",
         str(int(_as_float(journal_map.get("closed_trade_count")))),
+    )
+
+    third_row = streamlit.columns(4)
+    third_row[0].metric(
+        "Resolved predictions",
+        str(int(_as_float(calibration_map.get("resolved_prediction_count")))),
+    )
+    third_row[1].metric(
+        "Pending predictions",
+        str(int(_as_float(calibration_map.get("unresolved_prediction_count")))),
+    )
+    third_row[2].metric(
+        "Calibration hit rate",
+        _format_pct(calibration_map.get("hit_rate"), scale=100),
+    )
+    third_row[3].metric(
+        "Brier score",
+        f"{_as_float(calibration_map.get('brier_score')):.4f}",
     )
 
 

@@ -50,6 +50,7 @@ from ingestion.prices_ingestion import PriceQuote, PricesIngestionService
 from ingestion.rss_config import RSS_FEED_GROUPS, FeedSource
 from ingestion.rss_ingestion import RSSIngestionService
 from monitoring.audit_log import AuditSummary, build_audit_summary_from_file
+from monitoring.calibration import CalibrationSummary, build_calibration_summary
 from monitoring.drawdown import DrawdownSnapshot, EquityPoint, build_drawdown_snapshot
 from monitoring.pnl import PnLSnapshot, build_pnl_snapshot
 from monitoring.trade_journal import (
@@ -127,6 +128,7 @@ class RuntimeCycleResult:
     drawdown_snapshot: DrawdownSnapshot
     audit_summary: AuditSummary
     journal_summary: TradeJournalSummary
+    calibration_summary: CalibrationSummary
     reputation: ReputationSnapshot
 
     @property
@@ -174,6 +176,8 @@ class RuntimeCycleResult:
                     "notional_usd": intent.notional_usd,
                     "quantity": intent.quantity,
                     "score": intent.score,
+                    "confidence_score": intent.confidence_score,
+                    "expected_move": intent.expected_move,
                     "generated_at": intent.generated_at.isoformat(),
                     "signal_id": intent.signal_id,
                     "raw_event_id": intent.raw_event_id,
@@ -200,6 +204,7 @@ class RuntimeCycleResult:
             "drawdown_snapshot": self.drawdown_snapshot.to_dict(),
             "audit_summary": self.audit_summary.to_dict(),
             "journal_summary": self.journal_summary.to_dict(),
+            "calibration_summary": self.calibration_summary.to_dict(),
             "reputation": self.reputation.to_dict(),
         }
 
@@ -248,6 +253,8 @@ class RuntimeCycleResult:
                     "notional_usd": round(intent.notional_usd, 2),
                     "quantity": round(intent.quantity, 8),
                     "score": intent.score,
+                    "confidence_score": intent.confidence_score,
+                    "expected_move": intent.expected_move,
                     "generated_at": intent.generated_at.isoformat(),
                     "signal_id": intent.signal_id,
                     "raw_event_id": intent.raw_event_id,
@@ -314,18 +321,19 @@ class RuntimeCycleResult:
                 "event_counts": dict(self.journal_summary.event_counts),
                 "symbol_counts": dict(self.journal_summary.symbol_counts),
                 "source_event_counts": dict(self.journal_summary.source_event_counts),
-                "event_performance": {
-                    event_type: metrics.to_dict()
-                    for event_type, metrics in self.journal_summary.event_performance.items()
+                    "event_performance": {
+                        event_type: metrics.to_dict()
+                        for event_type, metrics in self.journal_summary.event_performance.items()
+                    },
+                    "open_positions": dict(self.journal_summary.open_positions),
+                    "last_recorded_at": self.journal_summary.last_recorded_at.isoformat()
+                    if self.journal_summary.last_recorded_at
+                    else None,
                 },
-                "open_positions": dict(self.journal_summary.open_positions),
-                "last_recorded_at": self.journal_summary.last_recorded_at.isoformat()
-                if self.journal_summary.last_recorded_at
-                else None,
-            },
-            "reputation": self.reputation.to_dict(),
-            "signal_discovery": _build_signal_discovery_summary(self.artifacts),
-            "last_action": {
+                "calibration_summary": self.calibration_summary.to_dict(),
+                "reputation": self.reputation.to_dict(),
+                "signal_discovery": _build_signal_discovery_summary(self.artifacts),
+                "last_action": {
                 "action": "cycle_completed",
                 "status": "completed",
                 "occurred_at": self.portfolio.as_of.isoformat(),
@@ -1283,10 +1291,17 @@ class TradingApplication:
         drawdown_snapshot = build_drawdown_snapshot(self._equity_history)
         audit_summary = build_audit_summary_from_file(self.paths.audit_log_path)
         journal_summary = self._trade_journal.build_summary()
+        calibration_summary = build_calibration_summary(self._trade_journal.load_entries())
         self._artifact_ledger.record_action(
             action="performance_snapshot_updated",
             status="recorded",
-            affects=("portfolio", "pnl_snapshot", "drawdown_snapshot", "journal_summary"),
+            affects=(
+                "portfolio",
+                "pnl_snapshot",
+                "drawdown_snapshot",
+                "journal_summary",
+                "calibration_summary",
+            ),
             details={
                 "total_equity": round(portfolio.total_equity, 2),
                 "cash_usd": round(portfolio.cash_usd, 2),
@@ -1309,6 +1324,7 @@ class TradingApplication:
                 "drawdown_snapshot": drawdown_snapshot.to_dict(),
                 "audit_summary": audit_summary.to_dict(),
                 "journal_summary": journal_summary.to_dict(),
+                "calibration_summary": calibration_summary.to_dict(),
                 "reputation": self._reputation.to_dict(),
                 "signal_discovery": _build_signal_discovery_summary(artifacts),
             },
@@ -1342,6 +1358,7 @@ class TradingApplication:
             drawdown_snapshot=drawdown_snapshot,
             audit_summary=audit_summary,
             journal_summary=journal_summary,
+            calibration_summary=calibration_summary,
             reputation=self._reputation,
         )
         self._artifact_ledger.record(
@@ -1435,6 +1452,8 @@ class TradingApplication:
                     exit_horizon_label=intent.exit_horizon_label,
                     max_hold_minutes=intent.max_hold_minutes,
                     exit_due_at=intent.exit_due_at,
+                    confidence_score=intent.confidence_score,
+                    expected_move=intent.expected_move,
                 )
                 working_portfolio = self._portfolio_provider.get_portfolio_snapshot()
                 journal_entry = TradeJournalEntry.from_execution_result(

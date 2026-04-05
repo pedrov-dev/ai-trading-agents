@@ -63,6 +63,8 @@ Artifacts written after the run:
 - `artifacts/validation_artifacts.jsonl`
 - `artifacts/validation_checkpoints.jsonl`
 
+`artifacts/run_summary.json` includes portfolio/performance data plus confidence calibration metrics from resolved trades, including hit rate by confidence bucket and the aggregate Brier score.
+
 > Check the `execution_config` block in the output. It should show `trading_mode: paper`, `live_connected_paper_trading: true`, and `will_submit_real_orders: false`.
 
 ---
