@@ -291,6 +291,88 @@ def test_ingest_secondary_prices_merges_hourly_quotes_into_runtime_state(tmp_pat
     assert {quote.symbol_id for quote in app._latest_quotes} == {"btc_usd", "matic_usd"}
 
 
+def test_execute_trade_cycle_uses_pending_scheduler_results(tmp_path: Path) -> None:
+    def fake_parse_feed(_url: str) -> dict[str, object]:
+        return {
+            "entries": [
+                {
+                    "title": "SEC approved the bitcoin ETF after exchange review",
+                    "link": "https://example.test/bitcoin-etf-approved",
+                    "published": "2026-04-03T12:00:00+00:00",
+                }
+            ]
+        }
+
+    def fake_http_get(url: str, params: dict[str, str]) -> dict[str, object]:
+        if url.endswith("/Ticker"):
+            pair = params["pair"]
+            return {
+                "error": [],
+                "result": {
+                    pair: {
+                        "c": ["68000.0", "1"],
+                        "o": "66000.0",
+                        "h": ["68500.0", "68500.0"],
+                        "l": ["65500.0", "65500.0"],
+                        "p": ["67000.0", "67000.0"],
+                    }
+                },
+            }
+        raise AssertionError(f"Unexpected URL called: {url}")
+
+    def fake_runner(command: tuple[str, ...], timeout_seconds: int) -> CommandRunResult:
+        assert timeout_seconds == 15
+        return CommandRunResult(
+            exit_code=0,
+            stdout='{"status": "validated", "validated": true}',
+            stderr="",
+        )
+
+    app = build_local_demo_app(
+        base_dir=tmp_path,
+        feed_groups={
+            "market_news": [FeedSource(source_id="demo_feed", url="https://example.test/rss")]
+        },
+        symbols=[BTC_SYMBOL],
+        parse_feed=fake_parse_feed,
+        http_get=fake_http_get,
+        env={
+            "KRAKEN_API_KEY": "demo-key",
+            "KRAKEN_API_SECRET": "demo-secret",
+        },
+        trading_mode="paper",
+        execution_runner=fake_runner,
+        execution_config=KrakenCLIConfig(
+            executable="kraken-cli",
+            dry_run=False,
+            live_enabled=True,
+            validate_only=True,
+            audit_log_path=tmp_path / "artifacts" / "orders_audit.jsonl",
+        ),
+        **_storage_overrides(tmp_path),
+    )
+
+    rss_result = app.ingest_rss_group(feed_group="market_news")
+    prices_result = app.ingest_prices()
+    classification_count = app.classify_events()
+
+    assert rss_result.inserted_count == 1
+    assert prices_result.inserted_count == 1
+    assert classification_count >= 1
+
+    result = app.execute_trade_cycle()
+
+    assert result.rss_result.inserted_count == 1
+    assert result.prices_result.inserted_count == 1
+    assert result.classification_count == classification_count
+
+    next_result = app.execute_trade_cycle()
+
+    assert next_result.rss_result.inserted_count == 0
+    assert next_result.prices_result.inserted_count == 0
+    assert next_result.classification_count == 0
+
+
 def test_dynamic_tier_promotion_moves_secondary_symbol_into_core_polling(tmp_path: Path) -> None:
     observed_pairs: list[str] = []
 

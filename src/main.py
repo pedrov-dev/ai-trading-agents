@@ -989,6 +989,9 @@ class TradingApplication:
             EquityPoint(recorded_at=snapshot.as_of, equity=snapshot.total_equity)
         ]
         self._latest_quotes: list[PriceQuote] = []
+        self._pending_rss_result: IngestionRunResult | None = None
+        self._pending_prices_result: IngestionRunResult | None = None
+        self._pending_classification_count = 0
         self._handled_event_keys: set[tuple[str, str, str]] = set()
         if self._shared_contract_config is not None and self._identity.agent_id.isdigit():
             self.persist_agent_id(self._identity.agent_id)
@@ -1619,10 +1622,11 @@ class TradingApplication:
     def ingest_rss_group(self, *, feed_group: str = "market_news") -> IngestionRunResult:
         articles = self._rss_service.fetch_group(feed_group)
         unique_articles = self._rss_service.deduplicate(articles)
-        return self._rss_pipeline.persist_articles(
+        result = self._rss_pipeline.persist_articles(
             source_group=feed_group,
             articles=unique_articles,
         )
+        return self._remember_rss_result(result)
 
     @staticmethod
     def _merge_quotes(
@@ -1635,7 +1639,7 @@ class TradingApplication:
         return list(merged.values())
 
     @staticmethod
-    def _combine_price_results(
+    def _combine_ingestion_results(
         primary: IngestionRunResult,
         secondary: IngestionRunResult,
     ) -> IngestionRunResult:
@@ -1645,6 +1649,60 @@ class TradingApplication:
             fetched_count=primary.fetched_count + secondary.fetched_count,
             inserted_count=primary.inserted_count + secondary.inserted_count,
             duplicate_count=primary.duplicate_count + secondary.duplicate_count,
+        )
+
+    @classmethod
+    def _accumulate_ingestion_result(
+        cls,
+        current: IngestionRunResult | None,
+        latest: IngestionRunResult | None,
+    ) -> IngestionRunResult | None:
+        if latest is None:
+            return current
+        if current is None:
+            return latest
+        return cls._combine_ingestion_results(current, latest)
+
+    def _remember_rss_result(self, result: IngestionRunResult) -> IngestionRunResult:
+        self._pending_rss_result = self._accumulate_ingestion_result(
+            self._pending_rss_result,
+            result,
+        )
+        return result
+
+    def _remember_prices_result(
+        self,
+        result: IngestionRunResult | None,
+    ) -> IngestionRunResult | None:
+        if result is None:
+            return None
+        self._pending_prices_result = self._accumulate_ingestion_result(
+            self._pending_prices_result,
+            result,
+        )
+        return result
+
+    def _resolve_pending_cycle_inputs(
+        self,
+        *,
+        rss_result: IngestionRunResult | None,
+        prices_result: IngestionRunResult | None,
+        classification_count: int | None,
+    ) -> tuple[IngestionRunResult | None, IngestionRunResult | None, int]:
+        resolved_rss_result = rss_result or self._pending_rss_result
+        resolved_prices_result = prices_result or self._pending_prices_result
+        resolved_classification_count = (
+            self._pending_classification_count
+            if classification_count is None
+            else classification_count
+        )
+        self._pending_rss_result = None
+        self._pending_prices_result = None
+        self._pending_classification_count = 0
+        return (
+            resolved_rss_result,
+            resolved_prices_result,
+            resolved_classification_count,
         )
 
     def _ingest_quotes_with_service(
@@ -1658,23 +1716,32 @@ class TradingApplication:
     def ingest_prices(self, *, include_secondary: bool = False) -> IngestionRunResult:
         result = self._ingest_quotes_with_service(self._prices_service)
         if include_secondary:
-            secondary_result = self.ingest_secondary_prices()
+            secondary_result = self.ingest_secondary_prices(record_pending=False)
             if secondary_result is not None:
-                return self._combine_price_results(result, secondary_result)
+                result = self._combine_ingestion_results(result, secondary_result)
+        self._remember_prices_result(result)
         return result
 
-    def ingest_secondary_prices(self) -> IngestionRunResult | None:
+    def ingest_secondary_prices(
+        self,
+        *,
+        record_pending: bool = True,
+    ) -> IngestionRunResult | None:
         if self._secondary_prices_service is None:
             return None
         result = self._ingest_quotes_with_service(self._secondary_prices_service)
         self.refresh_dynamic_tier_promotions(price_quotes=list(self._latest_quotes))
+        if record_pending:
+            self._remember_prices_result(result)
         return result
 
     def classify_events(self) -> int:
-        return self._detection_service.classify_pending_events(
+        classified_count = self._detection_service.classify_pending_events(
             source_type="rss",
             batch_size=100,
         )
+        self._pending_classification_count += max(0, classified_count)
+        return classified_count
 
     def run_cycle(self, *, feed_group: str = "market_news") -> RuntimeCycleResult:
         rss_result = self.ingest_rss_group(feed_group=feed_group)
@@ -1691,9 +1758,14 @@ class TradingApplication:
         *,
         rss_result: IngestionRunResult | None = None,
         prices_result: IngestionRunResult | None = None,
-        classification_count: int = 0,
+        classification_count: int | None = None,
     ) -> RuntimeCycleResult:
         self._last_post_trade_reviews = []
+        rss_result, prices_result, classification_count = self._resolve_pending_cycle_inputs(
+            rss_result=rss_result,
+            prices_result=prices_result,
+            classification_count=classification_count,
+        )
         current_portfolio = self._portfolio_provider.get_portfolio_snapshot()
         detected_events = self._new_detected_events()
         promoted_symbols = self.refresh_dynamic_tier_promotions(
