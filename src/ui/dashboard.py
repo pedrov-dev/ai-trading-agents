@@ -350,6 +350,61 @@ def build_calibration_rows(payload: Mapping[str, Any] | None) -> list[dict[str, 
     return rows
 
 
+def _build_performance_rows(
+    performance_map: Mapping[str, Any] | None,
+    *,
+    label_name: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(performance_map, Mapping):
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for label, details in performance_map.items():
+        if not isinstance(details, Mapping):
+            continue
+        rows.append(
+            {
+                label_name: str(label),
+                "trade_count": int(_as_float(details.get("trade_count"))),
+                "hit_rate_pct": round(_as_float(details.get("hit_rate")) * 100, 2),
+                "avg_return_pct": round(_as_float(details.get("avg_return")) * 100, 2),
+                "sharpe": round(_as_float(details.get("sharpe")), 2),
+                "realized_pnl_usd": _as_float(details.get("realized_pnl_usd")),
+            }
+        )
+    return sorted(
+        rows,
+        key=lambda row: (row["trade_count"], row["realized_pnl_usd"]),
+        reverse=True,
+    )
+
+
+def build_event_performance_rows(payload: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Flatten event-bucket performance into dashboard rows."""
+    if payload is None:
+        return []
+    journal_summary = payload.get("journal_summary")
+    if not isinstance(journal_summary, Mapping):
+        return []
+    return _build_performance_rows(
+        cast(Mapping[str, Any] | None, journal_summary.get("event_performance")),
+        label_name="event_type",
+    )
+
+
+def build_asset_performance_rows(payload: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Flatten per-asset performance into dashboard rows."""
+    if payload is None:
+        return []
+    journal_summary = payload.get("journal_summary")
+    if not isinstance(journal_summary, Mapping):
+        return []
+    return _build_performance_rows(
+        cast(Mapping[str, Any] | None, journal_summary.get("asset_performance")),
+        label_name="asset",
+    )
+
+
 def build_activity_rows(activity_records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Flatten live activity updates into a concise table for the dashboard."""
     rows: list[dict[str, Any]] = []
@@ -527,6 +582,8 @@ def render_dashboard() -> None:
     signal_discovery_rows = build_signal_discovery_rows(latest_payload)
     no_trade_rows = build_no_trade_rows(latest_payload)
     calibration_rows = build_calibration_rows(latest_payload)
+    event_performance_rows = build_event_performance_rows(latest_payload)
+    asset_performance_rows = build_asset_performance_rows(latest_payload)
 
     _render_kpis(streamlit, latest_payload)
 
@@ -571,6 +628,12 @@ def render_dashboard() -> None:
         else:
             streamlit.write("No closed horizon outcomes recorded yet.")
 
+        streamlit.subheader("Performance by asset")
+        if asset_performance_rows:
+            streamlit.dataframe(asset_performance_rows, width='stretch')
+        else:
+            streamlit.write("No asset-level closed-trade performance recorded yet.")
+
     with right_column:
         streamlit.subheader("Execution results")
         if execution_rows:
@@ -598,6 +661,12 @@ def render_dashboard() -> None:
             streamlit.dataframe(calibration_rows, width='stretch')
         else:
             streamlit.write("No resolved predictions available yet.")
+
+        streamlit.subheader("Performance by event type")
+        if event_performance_rows:
+            streamlit.dataframe(event_performance_rows, width='stretch')
+        else:
+            streamlit.write("No event-level closed-trade performance recorded yet.")
 
     streamlit.subheader("Runtime details")
     runtime_details = {
@@ -745,30 +814,45 @@ def _render_kpis(streamlit: Any, latest_payload: Mapping[str, Any] | None) -> No
         "Open positions",
         str(int(_as_float(portfolio_map.get("open_position_count")))),
     )
-    second_row[1].metric("Win rate", _format_pct(pnl_map.get("win_rate"), scale=100))
+    second_row[1].metric("Hit rate", _format_pct(journal_map.get("hit_rate"), scale=100))
     second_row[2].metric(
-        "Max drawdown",
-        _format_pct(drawdown_map.get("max_drawdown_fraction"), scale=100),
+        "Avg return",
+        _format_pct(journal_map.get("avg_return"), scale=100),
     )
-    second_row[3].metric(
-        "Closed trades",
-        str(int(_as_float(journal_map.get("closed_trade_count")))),
-    )
+    second_row[3].metric("Sharpe ratio", f"{_as_float(journal_map.get('sharpe')):.2f}")
 
     third_row = streamlit.columns(4)
     third_row[0].metric(
+        "Max drawdown",
+        _format_pct(drawdown_map.get("max_drawdown_fraction"), scale=100),
+    )
+    third_row[1].metric(
+        "Closed trades",
+        str(int(_as_float(journal_map.get("closed_trade_count")))),
+    )
+    third_row[2].metric(
+        "Trade freq/hr",
+        f"{_as_float(journal_map.get('trade_frequency_per_hour')):.2f}",
+    )
+    third_row[3].metric(
+        "Open win rate",
+        _format_pct(pnl_map.get("win_rate"), scale=100),
+    )
+
+    fourth_row = streamlit.columns(4)
+    fourth_row[0].metric(
         "Resolved predictions",
         str(int(_as_float(calibration_map.get("resolved_prediction_count")))),
     )
-    third_row[1].metric(
+    fourth_row[1].metric(
         "Pending predictions",
         str(int(_as_float(calibration_map.get("unresolved_prediction_count")))),
     )
-    third_row[2].metric(
+    fourth_row[2].metric(
         "Calibration hit rate",
         _format_pct(calibration_map.get("hit_rate"), scale=100),
     )
-    third_row[3].metric(
+    fourth_row[3].metric(
         "Brier score",
         f"{_as_float(calibration_map.get('brier_score')):.4f}",
     )

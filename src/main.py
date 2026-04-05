@@ -424,25 +424,7 @@ class RuntimeCycleResult:
                 if self.audit_summary.last_recorded_at
                 else None,
             },
-            "journal_summary": {
-                "total_entries": self.journal_summary.total_entries,
-                "closed_trade_count": self.journal_summary.closed_trade_count,
-                "open_position_count": self.journal_summary.open_position_count,
-                "realized_pnl_usd": self.journal_summary.realized_pnl_usd,
-                "win_count": self.journal_summary.win_count,
-                "loss_count": self.journal_summary.loss_count,
-                "event_counts": dict(self.journal_summary.event_counts),
-                "symbol_counts": dict(self.journal_summary.symbol_counts),
-                "source_event_counts": dict(self.journal_summary.source_event_counts),
-                    "event_performance": {
-                        event_type: metrics.to_dict()
-                        for event_type, metrics in self.journal_summary.event_performance.items()
-                    },
-                    "open_positions": dict(self.journal_summary.open_positions),
-                    "last_recorded_at": self.journal_summary.last_recorded_at.isoformat()
-                    if self.journal_summary.last_recorded_at
-                    else None,
-                },
+            "journal_summary": self.journal_summary.to_dict(),
                 "calibration_summary": self.calibration_summary.to_dict(),
                 "reputation": self.reputation.to_dict(),
                 "signal_discovery": _build_signal_discovery_summary(self.artifacts),

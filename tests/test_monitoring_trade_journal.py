@@ -1,6 +1,8 @@
 import json
 from datetime import UTC, datetime
 
+import pytest
+
 from monitoring.trade_journal import (
     LocalTradeJournal,
     TradeJournalEntry,
@@ -128,6 +130,13 @@ def test_trade_journal_summarizes_event_type_performance_metrics() -> None:
 
     etf_metrics = summary.event_performance["etf_news"]
     macro_metrics = summary.event_performance["macro_news"]
+    btc_metrics = summary.asset_performance["btc_usd"]
+    eth_metrics = summary.asset_performance["eth_usd"]
+
+    assert summary.hit_rate == pytest.approx(0.6667, rel=1e-4)
+    assert summary.avg_return == pytest.approx(0.02)
+    assert summary.sharpe > 0
+    assert summary.trade_frequency_per_hour == pytest.approx(18.0)
 
     assert etf_metrics.trade_count == 2
     assert etf_metrics.avg_return == 0.04
@@ -137,3 +146,12 @@ def test_trade_journal_summarizes_event_type_performance_metrics() -> None:
     assert macro_metrics.avg_return == -0.02
     assert macro_metrics.hit_rate == 0.0
     assert macro_metrics.sharpe == 0.0
+
+    assert btc_metrics.trade_count == 2
+    assert btc_metrics.avg_return == pytest.approx(0.015)
+    assert btc_metrics.hit_rate == pytest.approx(0.5)
+    assert btc_metrics.realized_pnl_usd == pytest.approx(15.0)
+    assert eth_metrics.trade_count == 1
+    assert eth_metrics.avg_return == pytest.approx(0.03)
+    assert eth_metrics.hit_rate == pytest.approx(1.0)
+    assert eth_metrics.realized_pnl_usd == pytest.approx(45.0)

@@ -388,12 +388,13 @@ class TradeJournalEntry:
 
 @dataclass(frozen=True)
 class EventTypePerformance:
-    """Aggregate realized performance metrics for one signal event bucket."""
+    """Aggregate realized performance metrics for one reporting bucket."""
 
     avg_return: float
     hit_rate: float
     sharpe: float
     trade_count: int
+    realized_pnl_usd: float = 0.0
 
     def to_dict(self) -> dict[str, float | int]:
         return {
@@ -401,6 +402,7 @@ class EventTypePerformance:
             "hit_rate": self.hit_rate,
             "sharpe": self.sharpe,
             "trade_count": self.trade_count,
+            "realized_pnl_usd": self.realized_pnl_usd,
         }
 
 
@@ -414,10 +416,16 @@ class TradeJournalSummary:
     realized_pnl_usd: float
     win_count: int
     loss_count: int
-    event_counts: dict[str, int]
-    symbol_counts: dict[str, int]
+    hit_rate: float = 0.0
+    avg_return: float = 0.0
+    sharpe: float = 0.0
+    trade_frequency_per_hour: float = 0.0
+    trade_frequency_per_day: float = 0.0
+    event_counts: dict[str, int] = field(default_factory=dict)
+    symbol_counts: dict[str, int] = field(default_factory=dict)
     source_event_counts: dict[str, int] = field(default_factory=dict)
     event_performance: dict[str, EventTypePerformance] = field(default_factory=dict)
+    asset_performance: dict[str, EventTypePerformance] = field(default_factory=dict)
     open_positions: dict[str, dict[str, Any]] = field(default_factory=dict)
     recent_entries: tuple[TradeJournalEntry, ...] = ()
     last_recorded_at: datetime | None = None
@@ -430,12 +438,21 @@ class TradeJournalSummary:
             "realized_pnl_usd": self.realized_pnl_usd,
             "win_count": self.win_count,
             "loss_count": self.loss_count,
+            "hit_rate": self.hit_rate,
+            "avg_return": self.avg_return,
+            "sharpe": self.sharpe,
+            "trade_frequency_per_hour": self.trade_frequency_per_hour,
+            "trade_frequency_per_day": self.trade_frequency_per_day,
             "event_counts": self.event_counts,
             "symbol_counts": self.symbol_counts,
             "source_event_counts": self.source_event_counts,
             "event_performance": {
                 event_type: metrics.to_dict()
                 for event_type, metrics in self.event_performance.items()
+            },
+            "asset_performance": {
+                symbol_id: metrics.to_dict()
+                for symbol_id, metrics in self.asset_performance.items()
             },
             "open_positions": self.open_positions,
             "recent_entries": [entry.to_dict() for entry in self.recent_entries],
@@ -561,17 +578,35 @@ def build_trade_journal_summary(
             "recorded_at": entry.recorded_at.isoformat(),
         }
 
+    win_count = sum(1 for entry in close_entries if entry.realized_pnl_usd > 0)
+    loss_count = sum(1 for entry in close_entries if entry.realized_pnl_usd < 0)
+    returns = [
+        entry.realized_return_fraction
+        for entry in close_entries
+        if entry.realized_return_fraction is not None
+    ]
+    hit_rate = round(win_count / len(close_entries), 4) if close_entries else 0.0
+    avg_return = round(sum(returns) / len(returns), 6) if returns else 0.0
+    sharpe = round(_calculate_sharpe_ratio(returns), 6) if returns else 0.0
+    trade_frequency_per_hour, trade_frequency_per_day = _calculate_trade_frequency(close_entries)
+
     return TradeJournalSummary(
         total_entries=len(ordered),
         closed_trade_count=len(close_entries),
         open_position_count=len(open_positions),
         realized_pnl_usd=round(sum(entry.realized_pnl_usd for entry in ordered), 2),
-        win_count=sum(1 for entry in close_entries if entry.realized_pnl_usd > 0),
-        loss_count=sum(1 for entry in close_entries if entry.realized_pnl_usd < 0),
+        win_count=win_count,
+        loss_count=loss_count,
+        hit_rate=hit_rate,
+        avg_return=avg_return,
+        sharpe=sharpe,
+        trade_frequency_per_hour=trade_frequency_per_hour,
+        trade_frequency_per_day=trade_frequency_per_day,
         event_counts=dict(event_counts),
         symbol_counts=dict(symbol_counts),
         source_event_counts=dict(source_event_counts),
         event_performance=_build_event_performance(close_entries),
+        asset_performance=_build_asset_performance(close_entries),
         open_positions=open_positions,
         recent_entries=ordered[-recent_entry_limit:],
         last_recorded_at=ordered[-1].recorded_at if ordered else None,
@@ -614,9 +649,16 @@ def _build_event_performance(
     close_entries: list[TradeJournalEntry],
 ) -> dict[str, EventTypePerformance]:
     grouped_returns: dict[str, list[float]] = {}
+    grouped_realized_pnl: dict[str, float] = {}
 
     for entry in close_entries:
-        if entry.source_event_group is None or entry.realized_return_fraction is None:
+        if entry.source_event_group is None:
+            continue
+        grouped_realized_pnl[entry.source_event_group] = round(
+            grouped_realized_pnl.get(entry.source_event_group, 0.0) + entry.realized_pnl_usd,
+            2,
+        )
+        if entry.realized_return_fraction is None:
             continue
         grouped_returns.setdefault(entry.source_event_group, []).append(
             entry.realized_return_fraction
@@ -628,9 +670,54 @@ def _build_event_performance(
             hit_rate=round(sum(1 for item in returns if item > 0) / len(returns), 4),
             sharpe=round(_calculate_sharpe_ratio(returns), 6),
             trade_count=len(returns),
+            realized_pnl_usd=grouped_realized_pnl.get(event_type, 0.0),
         )
         for event_type, returns in sorted(grouped_returns.items())
     }
+
+
+def _build_asset_performance(
+    close_entries: list[TradeJournalEntry],
+) -> dict[str, EventTypePerformance]:
+    grouped_returns: dict[str, list[float]] = {}
+    grouped_realized_pnl: dict[str, float] = {}
+
+    for entry in close_entries:
+        grouped_realized_pnl[entry.symbol_id] = round(
+            grouped_realized_pnl.get(entry.symbol_id, 0.0) + entry.realized_pnl_usd,
+            2,
+        )
+        if entry.realized_return_fraction is None:
+            continue
+        grouped_returns.setdefault(entry.symbol_id, []).append(entry.realized_return_fraction)
+
+    return {
+        symbol_id: EventTypePerformance(
+            avg_return=round(sum(returns) / len(returns), 6),
+            hit_rate=round(sum(1 for item in returns if item > 0) / len(returns), 4),
+            sharpe=round(_calculate_sharpe_ratio(returns), 6),
+            trade_count=len(returns),
+            realized_pnl_usd=grouped_realized_pnl.get(symbol_id, 0.0),
+        )
+        for symbol_id, returns in sorted(grouped_returns.items())
+    }
+
+
+def _calculate_trade_frequency(
+    close_entries: list[TradeJournalEntry],
+) -> tuple[float, float]:
+    trade_count = len(close_entries)
+    if trade_count == 0:
+        return 0.0, 0.0
+    if trade_count == 1:
+        return 1.0, 24.0
+
+    observed_seconds = max(
+        (close_entries[-1].recorded_at - close_entries[0].recorded_at).total_seconds(),
+        60.0,
+    )
+    trades_per_hour = round(trade_count / (observed_seconds / 3600.0), 4)
+    return trades_per_hour, round(trades_per_hour * 24.0, 4)
 
 
 def _calculate_realized_return_fraction(
