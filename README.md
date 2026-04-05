@@ -52,9 +52,9 @@ After a run, inspect:
 
 The repo also supports the official shared ERC-8004 contracts on **Sepolia** when you want identity, reputation, and validation records on-chain.
 
-1. Copy values from `.env.example`
-2. Set `IDENTITY_LAYER=erc8004`
-3. Provide `SEPOLIA_RPC_URL`, `PRIVATE_KEY`, and `AGENT_WALLET_PRIVATE_KEY`
+1. Copy the non-secret values into `.env.params`
+2. Put credentials and private keys in `.env.secrets`
+3. Set `IDENTITY_LAYER=erc8004`
 4. Reuse the official shared addresses already included in `.env.example`
 5. Run `python src/main.py --base-dir . --trading-mode paper --identity-layer erc8004`
 
@@ -83,5 +83,5 @@ The run summary now reports shared-contract status, including missing env values
 - Live trading is available with `python src/main.py --base-dir . --trading-mode live` plus `KRAKEN_CLI_ALLOW_LIVE_SUBMIT=true` and exchange credentials.
 - Optional on-chain identity is enabled with `--identity-layer erc8004`.
 - `python src/main.py --base-dir . --preflight` checks Kraken and optional ERC-8004 readiness without running a trading cycle.
-- The app auto-loads `.env` / `.runtime.env` from the selected `--base-dir`.
-- For optional external-backed mode, copy values from `.env.example`.
+- The app auto-loads `.env.params`, `.env.secrets`, legacy `.env`, and `.runtime.env` from the selected `--base-dir`.
+- Keep non-secret tuning in `.env.params` and credentials in `.env.secrets`.

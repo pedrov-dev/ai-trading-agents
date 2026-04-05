@@ -230,7 +230,10 @@ def postgres_connection_factory_from_env(
         return None
 
     database_url = str(
-        source.get("DATABASE_URL") or source.get("POSTGRES_DSN") or ""
+        source.get("DATABASE_URL")
+        or source.get("POSTGRES_DSN")
+        or source.get("BASE_URL")
+        or ""
     ).strip()
     if database_url:
         def _connect_with_dsn() -> Any:

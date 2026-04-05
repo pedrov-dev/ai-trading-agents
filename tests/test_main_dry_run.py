@@ -964,6 +964,68 @@ def test_build_runtime_preflight_reports_storage_blockers_when_not_configured(
     assert any("R2" in issue or "object storage" in issue for issue in report["issues"])
 
 
+def test_build_runtime_preflight_reads_split_env_files(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        "POSTGRES_ENABLED=false\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env.params").write_text(
+        "\n".join(
+            (
+                "POSTGRES_ENABLED=true",
+                "CF_R2_BUCKET=demo-bucket",
+                "CF_R2_ENDPOINT=https://example.r2.cloudflarestorage.com",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env.secrets").write_text(
+        "\n".join(
+            (
+                "DATABASE_URL=postgresql://demo:demo@localhost:5432/ai_trading",
+                "CF_R2_ACCESS_KEY=demo-access",
+                "CF_R2_SECRET_KEY=demo-secret-key",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = build_runtime_preflight(
+        trading_mode="paper",
+        identity_layer="none",
+        base_dir=tmp_path,
+        env={
+            "KRAKEN_API_KEY": "demo-key",
+            "KRAKEN_API_SECRET": "demo-secret",
+        },
+    )
+
+    assert report["checks"]["postgres_configured"] is True
+    assert report["checks"]["object_store_configured"] is True
+
+
+def test_build_runtime_preflight_allows_local_storage_and_offline_dry_run(
+    tmp_path: Path,
+) -> None:
+    report = build_runtime_preflight(
+        trading_mode="paper",
+        identity_layer="none",
+        base_dir=tmp_path,
+        env={
+            "STORAGE_BACKEND": "local",
+            "KRAKEN_EXECUTION_DRY_RUN": "true",
+            "KRAKEN_LIVE_ENABLED": "false",
+        },
+    )
+
+    assert report["status"] == "ready"
+    assert report["execution_config"]["storage_backend"] == "local"
+    assert report["execution_config"]["object_store_backend"] == "local"
+    assert report["issues"] == []
+
+
 def test_build_runtime_preflight_reports_live_mode_blockers(tmp_path: Path) -> None:
     report = build_runtime_preflight(
         trading_mode="live",

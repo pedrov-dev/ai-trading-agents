@@ -64,7 +64,13 @@ from monitoring.trade_journal import (
     TradeJournalEntry,
     TradeJournalSummary,
 )
-from storage.local_runtime import JsonlFileStore
+from storage.local_runtime import (
+    JsonlFileStore,
+    LocalEventDetectionRepository,
+    LocalFileObjectStore,
+    LocalInMemoryIngestionRunsRepository,
+    LocalInMemoryRawEventsRepository,
+)
 from storage.object_storage import ObjectStorageConfig, S3CompatibleObjectStore
 from storage.raw_ingestion import (
     IngestionRunResult,
@@ -84,6 +90,7 @@ from validation.artifacts import ArtifactKind, ValidationArtifact
 from validation.checkpoints import ValidationCheckpoint, build_checkpoints
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+RUNTIME_ENV_FILE_NAMES = (".env", ".env.params", ".env.secrets", ".runtime.env")
 
 
 @dataclass(frozen=True)
@@ -783,6 +790,14 @@ class TradingApplication:
             self._raw_events_repository = cast(RawEventsRepository, raw_events_repository)
             self._event_repository = cast(EventDetectionRepository, event_repository)
             self._object_store = cast(RawObjectStore, object_store)
+        elif _local_storage_requested(resolved_runtime_env):
+            (
+                self._storage_backend,
+                self._runs_repository,
+                self._raw_events_repository,
+                self._event_repository,
+                self._object_store,
+            ) = _build_local_storage(paths)
         else:
             (
                 self._storage_backend,
@@ -933,6 +948,8 @@ class TradingApplication:
             "object_store_backend": (
                 "r2"
                 if isinstance(self._object_store, S3CompatibleObjectStore)
+                else "local"
+                if self._storage_backend == "local"
                 else "explicit_override"
                 if self._storage_backend == "explicit_override"
                 else "unknown"
@@ -2179,21 +2196,26 @@ def _resolve_runtime_env(
     *,
     base_dir: str | Path,
     env: Mapping[str, str] | None = None,
-    trading_mode: str = "paper",
+    trading_mode: str | None = None,
 ) -> dict[str, str]:
     resolved_base_dir = Path(base_dir)
     merged: dict[str, str] = {}
-    for env_path in (resolved_base_dir / ".env", resolved_base_dir / ".runtime.env"):
-        merged.update(_read_env_file(env_path))
+    for env_file_name in RUNTIME_ENV_FILE_NAMES:
+        merged.update(_read_env_file(resolved_base_dir / env_file_name))
 
     source = env if env is not None else os.environ
     merged.update({key: str(value) for key, value in source.items()})
 
-    resolved_trading_mode = _normalize_trading_mode(trading_mode)
+    resolved_trading_mode = _normalize_trading_mode(
+        trading_mode or merged.get("TRADING_MODE") or "paper"
+    )
     merged["TRADING_MODE"] = resolved_trading_mode
-    merged["KRAKEN_EXECUTION_DRY_RUN"] = "false"
-    merged["KRAKEN_LIVE_ENABLED"] = "true"
-    merged["KRAKEN_VALIDATE_ONLY"] = "true" if resolved_trading_mode == "paper" else "false"
+    merged.setdefault("KRAKEN_EXECUTION_DRY_RUN", "false")
+    merged.setdefault("KRAKEN_LIVE_ENABLED", "true")
+    merged.setdefault(
+        "KRAKEN_VALIDATE_ONLY",
+        "true" if resolved_trading_mode == "paper" else "false",
+    )
     return merged
 
 
@@ -2249,6 +2271,31 @@ def _storage_overrides_provided(
     return True
 
 
+def _local_storage_requested(env: Mapping[str, str] | None) -> bool:
+    env_map = env if env is not None else {}
+    storage_backend = str(env_map.get("STORAGE_BACKEND", "")).strip().lower()
+    return storage_backend in {"local", "file", "memory"}
+
+
+def _build_local_storage(
+    paths: RuntimePaths,
+) -> tuple[
+    str,
+    LocalInMemoryIngestionRunsRepository,
+    LocalInMemoryRawEventsRepository,
+    LocalEventDetectionRepository,
+    LocalFileObjectStore,
+]:
+    paths.raw_payload_dir.mkdir(parents=True, exist_ok=True)
+    return (
+        "local",
+        LocalInMemoryIngestionRunsRepository(),
+        LocalInMemoryRawEventsRepository(),
+        LocalEventDetectionRepository(),
+        LocalFileObjectStore(paths.raw_payload_dir),
+    )
+
+
 def _require_postgres_storage(
     env: Mapping[str, str] | None,
 ) -> tuple[
@@ -2282,7 +2329,7 @@ def _require_object_store(
     try:
         config = ObjectStorageConfig.from_env(
             env=resolved_env,
-            env_path=env_path or (ROOT_DIR / ".env"),
+            env_path=env_path or ROOT_DIR,
         )
     except ValueError as exc:
         raise ValueError(
@@ -2414,6 +2461,7 @@ def build_runtime_preflight(
         issues.append(f"Artifacts directory is not writable: {paths.artifacts_dir}")
 
     execution_config = KrakenCLIConfig.from_env(env_map)
+    local_storage_mode = _local_storage_requested(env_map)
     kraken_credentials_present = bool(str(env_map.get("KRAKEN_API_KEY", "")).strip()) and bool(
         str(env_map.get("KRAKEN_API_SECRET", "")).strip()
     )
@@ -2423,11 +2471,24 @@ def build_runtime_preflight(
         "yes",
         "on",
     }
-    postgres_connection_factory = postgres_connection_factory_from_env(env_map)
+    will_submit_real_orders = (
+        execution_config.live_enabled
+        and not execution_config.dry_run
+        and not execution_config.validate_only
+    )
+    live_connected_paper = (
+        execution_config.live_enabled
+        and not execution_config.dry_run
+        and execution_config.validate_only
+    )
+    if will_submit_real_orders and not live_submit_enabled:
+        issues.append("Kraken live trading requires `KRAKEN_CLI_ALLOW_LIVE_SUBMIT=true`.")
+
+    postgres_connection_factory = None if local_storage_mode else postgres_connection_factory_from_env(env_map)
     postgres_configured = postgres_connection_factory is not None
     postgres_reachable = None
     postgres_error = None
-    if postgres_connection_factory is None:
+    if not local_storage_mode and postgres_connection_factory is None:
         issues.append(
             "Postgres storage is required. Set POSTGRES_ENABLED=true and configure "
             "DATABASE_URL or POSTGRES_* before starting the trading runtime."
@@ -2435,27 +2496,24 @@ def build_runtime_preflight(
 
     object_store_configured = False
     object_store_error = None
-    try:
-        ObjectStorageConfig.from_env(env=env_map, env_path=paths.base_dir / ".env")
+    if local_storage_mode:
         object_store_configured = True
-    except ValueError as exc:
-        object_store_error = str(exc)
-        issues.append(
-            "Cloudflare R2 / object storage is required for raw payload persistence. "
-            "Configure CF_R2_BUCKET, CF_R2_ENDPOINT, CF_R2_ACCESS_KEY, and "
-            "CF_R2_SECRET_KEY."
-        )
+    else:
+        try:
+            ObjectStorageConfig.from_env(env=env_map, env_path=paths.base_dir)
+            object_store_configured = True
+        except ValueError as exc:
+            object_store_error = str(exc)
+            issues.append(
+                "Cloudflare R2 / object storage is required for raw payload persistence. "
+                "Configure CF_R2_BUCKET, CF_R2_ENDPOINT, CF_R2_ACCESS_KEY, and "
+                "CF_R2_SECRET_KEY."
+            )
 
-    if execution_config.dry_run or not execution_config.live_enabled:
-        issues.append(
-            "Only Kraken paper/live trading modes are supported. Use `paper` or `live`."
-        )
-    if not kraken_credentials_present:
+    if not execution_config.dry_run and execution_config.live_enabled and not kraken_credentials_present:
         issues.append(
             "Kraken paper/live trading requires `KRAKEN_API_KEY` and `KRAKEN_API_SECRET`."
         )
-    if resolved_trading_mode == "live" and not live_submit_enabled:
-        issues.append("Kraken live trading requires `KRAKEN_CLI_ALLOW_LIVE_SUBMIT=true`.")
     if require_transaction_keys and resolved_identity_layer != "erc8004":
         issues.append("On-chain identity actions require `--identity-layer erc8004`.")
 
@@ -2488,17 +2546,6 @@ def build_runtime_preflight(
         if not postgres_reachable and postgres_error:
             issues.append(f"Postgres is configured but not reachable: {postgres_error}")
 
-    will_submit_real_orders = (
-        execution_config.live_enabled
-        and not execution_config.dry_run
-        and not execution_config.validate_only
-    )
-    live_connected_paper = (
-        execution_config.live_enabled
-        and not execution_config.dry_run
-        and execution_config.validate_only
-    )
-
     return {
         "status": "ready" if not issues else "error",
         "trading_mode": resolved_trading_mode,
@@ -2520,8 +2567,8 @@ def build_runtime_preflight(
             "kraken_dry_run": execution_config.dry_run,
             "kraken_live_enabled": execution_config.live_enabled,
             "kraken_validate_only": execution_config.validate_only,
-            "storage_backend": "postgres" if postgres_configured else "unconfigured",
-            "object_store_backend": "r2" if object_store_configured else "unconfigured",
+            "storage_backend": "local" if local_storage_mode else "postgres" if postgres_configured else "unconfigured",
+            "object_store_backend": "local" if local_storage_mode else "r2" if object_store_configured else "unconfigured",
             "postgres_error": postgres_error,
             "object_store_error": object_store_error,
         },
@@ -2595,7 +2642,7 @@ def reset_runtime_state(
     resolved_env = _resolve_runtime_env(
         base_dir=base_dir,
         env=env,
-        trading_mode=str((env or {}).get("TRADING_MODE", "paper")),
+        trading_mode=(str((env or {}).get("TRADING_MODE", "")).strip() or None),
     )
     paths = RuntimePaths.from_base_dir(base_dir)
 
@@ -2608,9 +2655,10 @@ def reset_runtime_state(
         runtime_env_removed = True
 
     issues: list[str] = []
+    local_storage_mode = _local_storage_requested(resolved_env)
     postgres_reset = False
     postgres_error = None
-    if reset_postgres:
+    if reset_postgres and not local_storage_mode:
         connection_factory = postgres_connection_factory_from_env(resolved_env)
         if connection_factory is None:
             postgres_error = (
@@ -2630,11 +2678,11 @@ def reset_runtime_state(
     deleted_object_keys = 0
     object_store_reset = False
     object_store_error = None
-    if reset_object_store:
+    if reset_object_store and not local_storage_mode:
         try:
             config = ObjectStorageConfig.from_env(
                 env=resolved_env,
-                env_path=Path(base_dir) / ".env",
+                env_path=Path(base_dir),
             )
             object_store = S3CompatibleObjectStore.from_config(config)
             deleted_object_keys += object_store.delete_prefix(prefix="raw/")
@@ -2726,7 +2774,11 @@ def run_scheduler_service(
             signal.signal(signum, previous_handler)
 
 
-def _build_cli_parser() -> argparse.ArgumentParser:
+def _build_cli_parser(
+    *,
+    default_env: Mapping[str, str] | None = None,
+) -> argparse.ArgumentParser:
+    resolved_defaults = dict(default_env or {})
     parser = argparse.ArgumentParser(
         description=(
             "Run the trading demo in Kraken paper or Kraken live mode, with optional "
@@ -2746,13 +2798,13 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--trading-mode",
         choices=("paper", "live"),
-        default=os.environ.get("TRADING_MODE", "paper"),
+        default=resolved_defaults.get("TRADING_MODE", "paper"),
         help="Kraken trading mode: `paper` validates orders, `live` can submit real orders.",
     )
     parser.add_argument(
         "--identity-layer",
         choices=("none", "erc8004"),
-        default=("erc8004" if os.environ.get("IDENTITY_LAYER") == "erc8004" else "none"),
+        default=("erc8004" if resolved_defaults.get("IDENTITY_LAYER") == "erc8004" else "none"),
         help="Optional identity layer for shared ERC-8004 / Sepolia actions.",
     )
     parser.add_argument(
@@ -2794,13 +2846,13 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-positions",
         type=int,
-        default=int(os.environ.get("OPPORTUNITY_MAX_POSITIONS", "3")),
+        default=int(resolved_defaults.get("OPPORTUNITY_MAX_POSITIONS", "3")),
         help="Opportunity budget: maximum concurrent symbols the agent may hold.",
     )
     parser.add_argument(
         "--max-per-asset",
         type=int,
-        default=int(os.environ.get("OPPORTUNITY_MAX_PER_ASSET", "1")),
+        default=int(resolved_defaults.get("OPPORTUNITY_MAX_PER_ASSET", "1")),
         help="Opportunity budget: maximum active position slots allowed per asset.",
     )
     parser.add_argument(
@@ -2819,20 +2871,20 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--rss-interval-seconds",
         type=int,
-        default=int(os.environ.get("RSS_INTERVAL_SECONDS", "120")),
+        default=int(resolved_defaults.get("RSS_INTERVAL_SECONDS", "120")),
         help="Scheduler interval for RSS ingestion jobs.",
     )
     parser.add_argument(
         "--prices-interval-seconds",
         type=int,
-        default=int(os.environ.get("PRICES_INTERVAL_SECONDS", "60")),
+        default=int(resolved_defaults.get("PRICES_INTERVAL_SECONDS", "60")),
         help="Scheduler interval for core Tier A price ingestion jobs.",
     )
     parser.add_argument(
         "--secondary-prices-interval-seconds",
         type=int,
         default=int(
-            os.environ.get(
+            resolved_defaults.get(
                 "SECONDARY_PRICES_INTERVAL_SECONDS",
                 str(SECONDARY_POLLING_FREQUENCY_SECONDS),
             )
@@ -2842,20 +2894,28 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--detection-interval-seconds",
         type=int,
-        default=int(os.environ.get("DETECTION_INTERVAL_SECONDS", "60")),
+        default=int(resolved_defaults.get("DETECTION_INTERVAL_SECONDS", "60")),
         help="Scheduler interval for event detection jobs.",
     )
     parser.add_argument(
         "--execution-interval-seconds",
         type=int,
-        default=int(os.environ.get("EXECUTION_INTERVAL_SECONDS", "60")),
+        default=int(resolved_defaults.get("EXECUTION_INTERVAL_SECONDS", "60")),
         help="Scheduler interval for trade execution jobs.",
     )
     return parser
 
 
 def main() -> int:
-    parser = _build_cli_parser()
+    base_dir_parser = argparse.ArgumentParser(add_help=False)
+    base_dir_parser.add_argument("--base-dir", default=str(ROOT_DIR))
+    bootstrap_args, _ = base_dir_parser.parse_known_args()
+    default_env = _resolve_runtime_env(
+        base_dir=bootstrap_args.base_dir,
+        env=os.environ,
+        trading_mode=(os.environ.get("TRADING_MODE") or None),
+    )
+    parser = _build_cli_parser(default_env=default_env)
     args = parser.parse_args()
 
     try:

@@ -12,6 +12,7 @@ from typing import Any, cast
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_ENV_PATH = ROOT_DIR / ".env"
+_ENV_FILE_NAMES = (".env", ".env.params", ".env.secrets", ".runtime.env")
 
 _OBJECT_STORAGE_ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "bucket": (
@@ -155,21 +156,37 @@ def _resolve_env_var(
     env: dict[str, str] | os._Environ[str],
     env_path: Path,
 ) -> str | None:
-    if env_path.exists():
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or "=" not in stripped:
-                continue
-            key, raw_value = stripped.split("=", 1)
-            if key.strip() == name:
-                resolved = raw_value.strip()
-                if resolved:
-                    return resolved
+    file_values = _load_env_values(env_path)
+    resolved = file_values.get(name)
+    if resolved:
+        return resolved
 
     value = env.get(name)
     if value:
         return value
     return None
+
+
+def _load_env_values(env_path: Path) -> dict[str, str]:
+    resolved = Path(env_path)
+    base_dir = resolved if resolved.exists() and resolved.is_dir() else resolved.parent
+    merged: dict[str, str] = {}
+
+    for file_name in _ENV_FILE_NAMES:
+        candidate = base_dir / file_name
+        if not candidate.exists():
+            continue
+        for line in candidate.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, raw_value = stripped.split("=", 1)
+            cleaned_key = key.strip()
+            cleaned_value = raw_value.strip()
+            if cleaned_key:
+                merged[cleaned_key] = cleaned_value
+
+    return merged
 
 
 class S3CompatibleObjectStore:

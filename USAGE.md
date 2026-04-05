@@ -1,6 +1,6 @@
 # Usage Guide
 
-> PowerShell examples below assume you are in the repo root. The app now auto-loads `.env` and `.runtime.env` from `--base-dir`, so saved Kraken/Sepolia settings are picked up automatically.
+> PowerShell examples below assume you are in the repo root. The app now auto-loads `.env.params`, `.env.secrets`, legacy `.env`, and `.runtime.env` from `--base-dir`, so saved Kraken/Sepolia settings are picked up automatically.
 
 ## 1) One-time setup
 
@@ -46,7 +46,7 @@ The dashboard reads the same artifact files written by the CLI and reflects the 
 This is the default and safest mode. Orders go through Kraken's validation path and are **not** submitted live.
 
 1. Activate the environment.
-2. Put `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` in `.env`.
+2. Put `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` in `.env.secrets`.
 3. Run a preflight to confirm paper readiness.
 4. Run one complete ingest → detect → strategy → execution cycle.
 
