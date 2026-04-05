@@ -100,3 +100,24 @@ def test_risk_manager_enforces_cooldown_after_losses() -> None:
 
     assert result.approved is False
     assert any(violation.code == "cooldown_after_loss" for violation in result.violations)
+
+
+def test_risk_manager_blocks_entries_when_risk_reward_ratio_is_too_low() -> None:
+    portfolio = PortfolioSnapshot(total_equity=10_000.0, cash_usd=10_000.0)
+    manager = RiskManager(RiskConfig(min_risk_reward_ratio=1.5))
+
+    result = manager.evaluate(
+        signal=_make_signal(score=0.72),
+        portfolio=portfolio,
+        proposed_notional=300.0,
+        risk_reward_ratio=1.4,
+        expected_move_fraction=0.028,
+        stop_distance_fraction=0.02,
+    )
+
+    assert result.approved is False
+    assert result.risk_reward_ratio == 1.4
+    assert result.expected_move_fraction == 0.028
+    assert result.stop_distance_fraction == 0.02
+    assert any(violation.code == "risk_reward_below_threshold" for violation in result.violations)
+    assert any("expected move" in note.lower() for note in result.notes)

@@ -63,6 +63,7 @@ class RankedSignal:
     diversification_score: float
     proposed_notional: float
     risk_result: RiskCheckResult
+    risk_reward_estimate: RiskRewardEstimate | None = None
 
     def ranking_rationale(self) -> tuple[str, ...]:
         return (
@@ -101,6 +102,27 @@ class ExitConfig:
     max_hold_minutes: int = 180
     close_on_opposite_event: bool = True
     target_horizons: tuple[ExitHorizon, ...] = _DEFAULT_EXIT_HORIZONS
+
+
+@dataclass(frozen=True)
+class RiskRewardEstimate:
+    """Simple explainable estimate used to judge opportunity quality before execution."""
+
+    expected_move_fraction: float
+    stop_distance_fraction: float
+    risk_reward_ratio: float
+    required_ratio: float = 1.5
+
+    def rationale(self, *, current_price: float) -> str:
+        expected_move_usd = max(current_price, 0.0) * self.expected_move_fraction
+        stop_distance_usd = max(current_price, 0.0) * self.stop_distance_fraction
+        return (
+            f"Expected move estimate {self.expected_move_fraction * 100:.2f}% "
+            f"(~${expected_move_usd:,.2f}); stop distance "
+            f"{self.stop_distance_fraction * 100:.2f}% (~${stop_distance_usd:,.2f}); "
+            f"risk/reward ratio {self.risk_reward_ratio:.2f}x "
+            f"(must stay > {self.required_ratio:.2f}x before execution)."
+        )
 
 
 class SimpleEventDrivenStrategy:
@@ -192,6 +214,7 @@ class SimpleEventDrivenStrategy:
                 )
                 continue
 
+            risk_reward_estimate = self._estimate_risk_reward(signal=signal, quote=quote)
             ranked_signal = self._rank_signal(
                 signal=signal,
                 quote=quote,
@@ -199,6 +222,7 @@ class SimpleEventDrivenStrategy:
                 proposed_notional=proposed_notional,
                 risk_result=risk_result,
                 recent_theses=recent_theses,
+                risk_reward_estimate=risk_reward_estimate,
             )
             current_best = ranked_signals.get(signal.symbol_id)
             if current_best is None or (
@@ -273,6 +297,7 @@ class SimpleEventDrivenStrategy:
                 rationale_suffix=rationale_suffix,
                 exit_config=self._exit_config,
                 max_intents=available_intent_slots,
+                risk_reward_estimate=ranked_signal.risk_reward_estimate,
             )
             if not symbol_intents:
                 continue
@@ -397,6 +422,7 @@ class SimpleEventDrivenStrategy:
         proposed_notional: float,
         risk_result: RiskCheckResult,
         recent_theses: tuple[_ThesisCooldownState, ...],
+        risk_reward_estimate: RiskRewardEstimate,
     ) -> RankedSignal:
         confidence_score = _clamp_score((signal.score * 0.7) + (signal.confidence * 0.3))
         best_similarity, best_state = self._best_thesis_match(
@@ -412,6 +438,7 @@ class SimpleEventDrivenStrategy:
             quote=quote,
             proposed_notional=proposed_notional,
             risk_result=risk_result,
+            risk_reward_estimate=risk_reward_estimate,
         )
         diversification_score = self._diversification_score(
             signal=signal,
@@ -439,6 +466,7 @@ class SimpleEventDrivenStrategy:
             diversification_score=diversification_score,
             proposed_notional=proposed_notional,
             risk_result=risk_result,
+            risk_reward_estimate=risk_reward_estimate,
         )
         ranked_signal = replace(
             ranked_signal,
@@ -456,6 +484,7 @@ class SimpleEventDrivenStrategy:
         quote: PriceQuote,
         proposed_notional: float,
         risk_result: RiskCheckResult,
+        risk_reward_estimate: RiskRewardEstimate,
     ) -> float:
         aligned_move = 0.0
         if quote.open > 0:
@@ -466,19 +495,75 @@ class SimpleEventDrivenStrategy:
                 else max(-session_move, 0.0)
             )
         aligned_score = _clamp_score(aligned_move / 0.03)
-        configured_rr = self._exit_config.profit_target_fraction / max(
-            self._exit_config.stop_loss_fraction,
-            0.0001,
+        expected_move_component = _clamp_score(
+            risk_reward_estimate.expected_move_fraction
+            / max(self._exit_config.profit_target_fraction, 0.0001)
         )
-        reward_risk_component = _clamp_score(configured_rr / 2.0)
+        reward_risk_component = _clamp_score(risk_reward_estimate.risk_reward_ratio / 2.0)
         sizing_efficiency = _clamp_score(
             risk_result.allowed_notional / proposed_notional if proposed_notional > 0 else 0.0
         )
         return _clamp_score(
-            (signal.score * 0.45)
-            + (aligned_score * 0.3)
-            + (reward_risk_component * 0.15)
+            (signal.score * 0.3)
+            + (aligned_score * 0.2)
+            + (expected_move_component * 0.2)
+            + (reward_risk_component * 0.2)
             + (sizing_efficiency * 0.1)
+        )
+
+    def _estimate_risk_reward(
+        self,
+        *,
+        signal: Signal,
+        quote: PriceQuote | None = None,
+        intent: TradeIntent | None = None,
+    ) -> RiskRewardEstimate:
+        if intent is not None and intent.risk_reward_ratio is not None:
+            expected_move_fraction = max(intent.expected_move_fraction or 0.0, 0.0)
+            stop_distance_fraction = max(
+                intent.stop_distance_fraction or self._exit_config.stop_loss_fraction,
+                0.0001,
+            )
+            risk_reward_ratio = max(intent.risk_reward_ratio, 0.0)
+            return RiskRewardEstimate(
+                expected_move_fraction=round(expected_move_fraction, 4),
+                stop_distance_fraction=round(stop_distance_fraction, 4),
+                risk_reward_ratio=round(risk_reward_ratio, 4),
+                required_ratio=self._risk_config.min_risk_reward_ratio,
+            )
+
+        confirmation_move = 0.0
+        resolved_quote = quote
+        if resolved_quote is not None and resolved_quote.open > 0:
+            session_move = (resolved_quote.current - resolved_quote.open) / resolved_quote.open
+            confirmation_move = (
+                max(session_move, 0.0)
+                if signal.side == "buy"
+                else max(-session_move, 0.0)
+            )
+
+        conviction_score = _clamp_score((signal.score * 0.7) + (signal.confidence * 0.3))
+        expected_move_fraction = round(
+            max(
+                (self._exit_config.profit_target_fraction * conviction_score)
+                + (confirmation_move * 0.25),
+                0.0,
+            ),
+            4,
+        )
+        stop_distance_fraction = round(
+            max(self._exit_config.stop_loss_fraction, 0.0001),
+            4,
+        )
+        risk_reward_ratio = round(
+            expected_move_fraction / max(stop_distance_fraction, 0.0001),
+            4,
+        )
+        return RiskRewardEstimate(
+            expected_move_fraction=expected_move_fraction,
+            stop_distance_fraction=stop_distance_fraction,
+            risk_reward_ratio=risk_reward_ratio,
+            required_ratio=self._risk_config.min_risk_reward_ratio,
         )
 
     def _diversification_score(
@@ -682,7 +767,7 @@ class SimpleEventDrivenStrategy:
             event_type=intent.event_type or "RUNTIME_RECHECK",
             symbol_id=intent.symbol_id,
             side=intent.side,
-            confidence=intent.score,
+            confidence=intent.confidence_score or intent.score,
             score=intent.score,
             current_price=intent.current_price,
             generated_at=intent.generated_at,
@@ -696,12 +781,16 @@ class SimpleEventDrivenStrategy:
             (existing_position.side == "long" and intent.side == "sell")
             or (existing_position.side == "short" and intent.side == "buy")
         )
+        risk_reward_estimate = self._estimate_risk_reward(signal=signal, intent=intent)
         return self._risk_manager.evaluate(
             signal=signal,
             portfolio=portfolio,
             proposed_notional=intent.notional_usd,
             now=now,
             reduce_only=reduce_only,
+            expected_move_fraction=risk_reward_estimate.expected_move_fraction,
+            stop_distance_fraction=risk_reward_estimate.stop_distance_fraction,
+            risk_reward_ratio=risk_reward_estimate.risk_reward_ratio,
         )
 
 
@@ -743,9 +832,14 @@ def _build_horizon_trade_intents(
     rationale_suffix: tuple[str, ...],
     exit_config: ExitConfig,
     max_intents: int | None = None,
+    risk_reward_estimate: RiskRewardEstimate | None = None,
 ) -> list[TradeIntent]:
     if max_intents is not None and max_intents <= 0:
         return []
+
+    estimate_suffix: tuple[str, ...] = ()
+    if risk_reward_estimate is not None:
+        estimate_suffix = (risk_reward_estimate.rationale(current_price=signal.current_price),)
 
     horizons = tuple(horizon for horizon in exit_config.target_horizons if horizon.weight > 0)
     if max_intents is not None:
@@ -755,9 +849,24 @@ def _build_horizon_trade_intents(
             build_trade_intent(
                 signal=signal,
                 notional_usd=allowed_notional,
-                rationale_suffix=rationale_suffix,
+                rationale_suffix=rationale_suffix + estimate_suffix,
                 max_hold_minutes=exit_config.max_hold_minutes,
                 position_id=f"{signal.signal_id}:core",
+                expected_move_fraction=(
+                    risk_reward_estimate.expected_move_fraction
+                    if risk_reward_estimate is not None
+                    else None
+                ),
+                stop_distance_fraction=(
+                    risk_reward_estimate.stop_distance_fraction
+                    if risk_reward_estimate is not None
+                    else None
+                ),
+                risk_reward_ratio=(
+                    risk_reward_estimate.risk_reward_ratio
+                    if risk_reward_estimate is not None
+                    else None
+                ),
             )
         ]
 
@@ -783,12 +892,28 @@ def _build_horizon_trade_intents(
                 signal=signal,
                 notional_usd=tranche_notional,
                 rationale_suffix=rationale_suffix
+                + estimate_suffix
                 + (
                     f"Exit tranche assigned to the {horizon.label} evaluation window.",
                 ),
                 exit_horizon_label=horizon.label,
                 max_hold_minutes=horizon.hold_minutes,
                 position_id=f"{signal.signal_id}:{horizon.label}",
+                expected_move_fraction=(
+                    risk_reward_estimate.expected_move_fraction
+                    if risk_reward_estimate is not None
+                    else None
+                ),
+                stop_distance_fraction=(
+                    risk_reward_estimate.stop_distance_fraction
+                    if risk_reward_estimate is not None
+                    else None
+                ),
+                risk_reward_ratio=(
+                    risk_reward_estimate.risk_reward_ratio
+                    if risk_reward_estimate is not None
+                    else None
+                ),
             )
         )
 

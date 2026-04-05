@@ -90,6 +90,9 @@ class ValidationArtifact:
             "score": intent.score,
             "confidence_score": intent.confidence_score,
             "expected_move": intent.expected_move,
+            "expected_move_fraction": intent.expected_move_fraction,
+            "stop_distance_fraction": intent.stop_distance_fraction,
+            "risk_reward_ratio": intent.risk_reward_ratio,
             "rationale": list(intent.rationale),
             "generated_at": intent.generated_at.isoformat(),
             "signal_id": intent.signal_id,
@@ -109,6 +112,12 @@ class ValidationArtifact:
             ),
             ArtifactEvidence(name="notional_usd", value=round(intent.notional_usd, 2), unit="usd"),
             ArtifactEvidence(name="quantity", value=round(intent.quantity, 8), unit="asset"),
+            ArtifactEvidence(
+                name="risk_reward_ratio",
+                value=intent.risk_reward_ratio,
+                unit="ratio",
+                passed=(intent.risk_reward_ratio is None or intent.risk_reward_ratio > 1.5),
+            ),
         )
         artifact_id = _stable_id(
             "trade-intent",
@@ -223,6 +232,9 @@ class ValidationArtifact:
             "proposed_notional": (
                 round(proposed_notional, 2) if proposed_notional is not None else None
             ),
+            "expected_move_fraction": result.expected_move_fraction,
+            "stop_distance_fraction": result.stop_distance_fraction,
+            "risk_reward_ratio": result.risk_reward_ratio,
             "violations": [
                 {"code": violation.code, "message": violation.message}
                 for violation in result.violations
@@ -235,6 +247,12 @@ class ValidationArtifact:
                 name="allowed_notional",
                 value=round(result.allowed_notional, 2),
                 unit="usd",
+                passed=result.approved,
+            ),
+            ArtifactEvidence(
+                name="risk_reward_ratio",
+                value=result.risk_reward_ratio,
+                unit="ratio",
                 passed=result.approved,
             ),
             ArtifactEvidence(name="violation_count", value=len(result.violations), unit="count"),

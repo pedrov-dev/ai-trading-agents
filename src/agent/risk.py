@@ -9,6 +9,18 @@ from agent.portfolio import PortfolioSnapshot
 from agent.signals import Signal
 
 
+def _normalize_fraction(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return round(max(value, 0.0), 4)
+
+
+def _format_fraction(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value * 100:.2f}%"
+
+
 @dataclass(frozen=True)
 class RiskConfig:
     """Risk guardrails for the MVP trading agent."""
@@ -19,6 +31,7 @@ class RiskConfig:
     max_positions_per_asset: int | None = None
     cooldown_minutes_after_loss: int = 30
     min_notional_usd: float = 50.0
+    min_risk_reward_ratio: float = 1.5
 
 
 @dataclass(frozen=True)
@@ -37,6 +50,9 @@ class RiskCheckResult:
     allowed_notional: float
     violations: tuple[RiskViolation, ...] = ()
     notes: tuple[str, ...] = ()
+    expected_move_fraction: float | None = None
+    stop_distance_fraction: float | None = None
+    risk_reward_ratio: float | None = None
 
 
 class RiskManager:
@@ -67,6 +83,9 @@ class RiskManager:
         proposed_notional: float,
         now: datetime | None = None,
         reduce_only: bool = False,
+        expected_move_fraction: float | None = None,
+        stop_distance_fraction: float | None = None,
+        risk_reward_ratio: float | None = None,
     ) -> RiskCheckResult:
         checked_at = now or datetime.now(UTC)
         max_position_notional = portfolio.total_equity * self._config.max_position_fraction
@@ -75,6 +94,17 @@ class RiskManager:
             max(0.0, proposed_notional if reduce_only else capped_notional),
             2,
         )
+
+        resolved_expected_move = _normalize_fraction(expected_move_fraction)
+        resolved_stop_distance = _normalize_fraction(stop_distance_fraction)
+        resolved_risk_reward = risk_reward_ratio
+        if resolved_risk_reward is None and resolved_expected_move is not None:
+            resolved_risk_reward = resolved_expected_move / max(
+                resolved_stop_distance or 0.0,
+                0.0001,
+            )
+        if resolved_risk_reward is not None:
+            resolved_risk_reward = round(max(resolved_risk_reward, 0.0), 4)
 
         violations: list[RiskViolation] = []
         notes: list[str] = []
@@ -134,6 +164,26 @@ class RiskManager:
                         )
                     )
 
+            if resolved_risk_reward is not None:
+                notes.append(
+                    "Estimated expected move "
+                    f"{_format_fraction(resolved_expected_move)}, stop distance "
+                    f"{_format_fraction(resolved_stop_distance)}, risk/reward ratio "
+                    f"{resolved_risk_reward:.2f}x."
+                )
+                if resolved_risk_reward <= self._config.min_risk_reward_ratio:
+                    violations.append(
+                        RiskViolation(
+                            code="risk_reward_below_threshold",
+                            message=(
+                                "Estimated risk/reward ratio "
+                                f"{resolved_risk_reward:.2f}x must be greater than "
+                                f"{self._config.min_risk_reward_ratio:.2f}x before "
+                                "execution."
+                            ),
+                        )
+                    )
+
         if allowed_notional <= 0:
             violations.append(
                 RiskViolation(
@@ -160,4 +210,7 @@ class RiskManager:
             allowed_notional=allowed_notional,
             violations=tuple(violations),
             notes=tuple(notes),
+            expected_move_fraction=resolved_expected_move,
+            stop_distance_fraction=resolved_stop_distance,
+            risk_reward_ratio=resolved_risk_reward,
         )

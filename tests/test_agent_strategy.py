@@ -46,6 +46,57 @@ def test_strategy_generates_trade_intent_for_high_confidence_event() -> None:
     assert all(intent.event_type == "ETF_APPROVAL" for intent in intents)
     assert all(intent.event_group == "etf_news" for intent in intents)
     assert all(any("ETF_APPROVAL" in reason for reason in intent.rationale) for intent in intents)
+    assert all(intent.expected_move_fraction is not None for intent in intents)
+    assert all(intent.stop_distance_fraction == 0.02 for intent in intents)
+    assert all(
+        intent.risk_reward_ratio is not None and intent.risk_reward_ratio > 1.5
+        for intent in intents
+    )
+    assert all(
+        any("expected move" in reason.lower() for reason in intent.rationale)
+        for intent in intents
+    )
+
+
+def test_strategy_reassess_trade_intent_blocks_entries_below_rr_threshold() -> None:
+    strategy = SimpleEventDrivenStrategy(
+        risk_config=RiskConfig(min_risk_reward_ratio=1.5),
+        exit_config=ExitConfig(profit_target_fraction=0.03, stop_loss_fraction=0.02),
+    )
+    portfolio = PortfolioSnapshot(total_equity=10_000.0, cash_usd=10_000.0)
+    intent = strategy.generate_trade_intents(
+        detected_events=[
+            DetectedEvent(
+                raw_event_id="evt-rr-low",
+                event_type="PROTOCOL_UPGRADE",
+                rule_name="protocol_upgrade",
+                confidence=0.84,
+                matched_text="upgrade delivered but follow-through is muted",
+                detected_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC),
+            )
+        ],
+        price_quotes=[
+            PriceQuote(
+                symbol_id="btc_usd",
+                current=68_000.0,
+                open=67_900.0,
+                high=68_100.0,
+                low=67_800.0,
+                prev_close=67_850.0,
+                timestamp=1712100000,
+                asset_class="spot",
+            )
+        ],
+        portfolio=portfolio,
+    )[0]
+
+    result = strategy.reassess_trade_intent(intent=intent, portfolio=portfolio)
+
+    assert result.approved is False
+    assert result.risk_reward_ratio is not None
+    assert result.risk_reward_ratio <= 1.5
+    assert any(violation.code == "risk_reward_below_threshold" for violation in result.violations)
+    assert any("stop distance" in note.lower() for note in result.notes)
 
 
 def test_strategy_splits_high_confidence_event_into_multiple_exit_horizons() -> None:

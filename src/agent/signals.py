@@ -143,6 +143,9 @@ class TradeIntent:
     rationale: tuple[str, ...]
     confidence_score: float | None = None
     expected_move: MoveDirection | None = None
+    expected_move_fraction: float | None = None
+    stop_distance_fraction: float | None = None
+    risk_reward_ratio: float | None = None
     generated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     signal_id: str | None = None
     raw_event_id: str | None = None
@@ -161,9 +164,29 @@ class TradeIntent:
         resolved_expected_move = self.expected_move or ("up" if self.side == "buy" else "down")
         if resolved_expected_move not in {"up", "down", "flat"}:
             raise ValueError("Trade intent expected_move must be one of: up, down, flat.")
+        if self.expected_move_fraction is not None and self.expected_move_fraction < 0:
+            raise ValueError("Trade intent expected_move_fraction must be non-negative.")
+        if self.stop_distance_fraction is not None and self.stop_distance_fraction < 0:
+            raise ValueError("Trade intent stop_distance_fraction must be non-negative.")
+        if self.risk_reward_ratio is not None and self.risk_reward_ratio < 0:
+            raise ValueError("Trade intent risk_reward_ratio must be non-negative.")
 
         object.__setattr__(self, "confidence_score", round(resolved_confidence, 4))
         object.__setattr__(self, "expected_move", resolved_expected_move)
+        if self.expected_move_fraction is not None:
+            object.__setattr__(
+                self,
+                "expected_move_fraction",
+                round(self.expected_move_fraction, 4),
+            )
+        if self.stop_distance_fraction is not None:
+            object.__setattr__(
+                self,
+                "stop_distance_fraction",
+                round(self.stop_distance_fraction, 4),
+            )
+        if self.risk_reward_ratio is not None:
+            object.__setattr__(self, "risk_reward_ratio", round(self.risk_reward_ratio, 4))
 
 
 @dataclass(frozen=True)
@@ -285,6 +308,9 @@ def build_trade_intent(
     exit_horizon_label: str | None = None,
     max_hold_minutes: int | None = None,
     position_id: str | None = None,
+    expected_move_fraction: float | None = None,
+    stop_distance_fraction: float | None = None,
+    risk_reward_ratio: float | None = None,
 ) -> TradeIntent:
     quantity = 0.0
     if signal.current_price > 0:
@@ -314,6 +340,9 @@ def build_trade_intent(
         rationale=rationale,
         confidence_score=signal.score,
         expected_move="up" if signal.side == "buy" else "down",
+        expected_move_fraction=expected_move_fraction,
+        stop_distance_fraction=stop_distance_fraction,
+        risk_reward_ratio=risk_reward_ratio,
         generated_at=signal.generated_at,
         signal_id=resolved_signal_id,
         raw_event_id=signal.raw_event_id,
