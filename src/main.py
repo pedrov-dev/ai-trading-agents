@@ -73,7 +73,7 @@ from storage.raw_postgres import (
     postgres_connection_factory_from_env,
     probe_postgres_connection,
 )
-from validation.artifacts import ValidationArtifact
+from validation.artifacts import ArtifactKind, ValidationArtifact
 from validation.checkpoints import ValidationCheckpoint, build_checkpoints
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -175,6 +175,11 @@ class RuntimeCycleResult:
                     "quantity": intent.quantity,
                     "score": intent.score,
                     "generated_at": intent.generated_at.isoformat(),
+                    "signal_id": intent.signal_id,
+                    "raw_event_id": intent.raw_event_id,
+                    "event_type": intent.event_type,
+                    "exit_horizon_label": intent.exit_horizon_label,
+                    "position_id": intent.position_id,
                     "rationale": list(intent.rationale),
                 }
                 for intent in self.trade_intents
@@ -182,6 +187,7 @@ class RuntimeCycleResult:
             "execution_results": [result.to_dict() for result in self.execution_results],
             "artifacts": [artifact.to_dict() for artifact in self.artifacts],
             "checkpoints": [checkpoint.to_dict() for checkpoint in self.checkpoints],
+            "signal_discovery": _build_signal_discovery_summary(self.artifacts),
             "portfolio": {
                 "total_equity": self.portfolio.total_equity,
                 "cash_usd": self.portfolio.cash_usd,
@@ -242,6 +248,11 @@ class RuntimeCycleResult:
                     "quantity": round(intent.quantity, 8),
                     "score": intent.score,
                     "generated_at": intent.generated_at.isoformat(),
+                    "signal_id": intent.signal_id,
+                    "raw_event_id": intent.raw_event_id,
+                    "event_type": intent.event_type,
+                    "exit_horizon_label": intent.exit_horizon_label,
+                    "position_id": intent.position_id,
                 }
                 for intent in self.trade_intents[-10:]
             ],
@@ -261,6 +272,11 @@ class RuntimeCycleResult:
                         else 0.0
                     ),
                     "client_order_id": result.request.client_order_id,
+                    "signal_id": result.request.signal_id,
+                    "raw_event_id": result.request.raw_event_id,
+                    "event_type": result.request.event_type,
+                    "exit_horizon_label": result.request.exit_horizon_label,
+                    "position_id": result.request.position_id,
                     "completed_at": result.completed_at.isoformat(),
                 }
                 for result in self.execution_results[-10:]
@@ -300,6 +316,7 @@ class RuntimeCycleResult:
                 else None,
             },
             "reputation": self.reputation.to_dict(),
+            "signal_discovery": _build_signal_discovery_summary(self.artifacts),
             "last_action": {
                 "action": "cycle_completed",
                 "status": "completed",
@@ -1267,6 +1284,7 @@ class TradingApplication:
                 "cash_usd": round(portfolio.cash_usd, 2),
                 "open_position_count": portfolio.open_position_count(),
                 "realized_pnl_today": round(portfolio.realized_pnl_today, 2),
+                "signal_outcome_count": _build_signal_discovery_summary(artifacts)["total_outcomes"],
             },
             occurred_at=portfolio.as_of,
             summary_updates={
@@ -1282,6 +1300,7 @@ class TradingApplication:
                 "audit_summary": audit_summary.to_dict(),
                 "journal_summary": journal_summary.to_dict(),
                 "reputation": self._reputation.to_dict(),
+                "signal_discovery": _build_signal_discovery_summary(artifacts),
             },
         )
 
@@ -1334,7 +1353,8 @@ class TradingApplication:
 
         for intent in trade_intents:
             subject_id = (
-                f"{intent.symbol_id}:{intent.side}:{intent.generated_at.isoformat()}"
+                f"{intent.signal_id or intent.symbol_id}:{intent.side}:"
+                f"{intent.exit_horizon_label or 'core'}:{intent.generated_at.isoformat()}"
             )
             trade_artifact = ValidationArtifact.from_trade_intent(
                 intent,
@@ -1388,22 +1408,55 @@ class TradingApplication:
             )
             if execution_result.fill is not None and execution_result.is_successful:
                 portfolio_before_fill = working_portfolio
+                closed_position = portfolio_before_fill.position_for_symbol(
+                    intent.symbol_id,
+                    position_id=intent.position_id,
+                )
                 self._portfolio_provider.record_fill(
                     symbol_id=intent.symbol_id,
                     side=intent.side,
                     quantity=execution_result.fill.filled_quantity,
                     price=execution_result.fill.average_price,
                     filled_at=execution_result.fill.filled_at,
+                    position_id=intent.position_id,
+                    source_signal_id=intent.signal_id,
+                    raw_event_id=intent.raw_event_id,
+                    event_type=intent.event_type,
+                    exit_horizon_label=intent.exit_horizon_label,
+                    max_hold_minutes=intent.max_hold_minutes,
+                    exit_due_at=intent.exit_due_at,
                 )
                 working_portfolio = self._portfolio_provider.get_portfolio_snapshot()
-                self._trade_journal.record_entry(
-                    TradeJournalEntry.from_execution_result(
-                        execution_result=execution_result,
-                        before_portfolio=portfolio_before_fill,
-                        after_portfolio=working_portfolio,
-                        notes=intent.rationale,
-                    )
+                journal_entry = TradeJournalEntry.from_execution_result(
+                    execution_result=execution_result,
+                    before_portfolio=portfolio_before_fill,
+                    after_portfolio=working_portfolio,
+                    notes=intent.rationale,
                 )
+                self._trade_journal.record_entry(journal_entry)
+                if (
+                    closed_position is not None
+                    and journal_entry.event_type in {"partial_exit", "full_exit", "reverse"}
+                ):
+                    signal_outcome_artifact = ValidationArtifact.from_signal_outcome(
+                        execution_result,
+                        symbol_id=closed_position.symbol_id,
+                        side=closed_position.side,
+                        entry_price=closed_position.entry_price,
+                        opened_at=closed_position.opened_at,
+                        exit_horizon_label=(
+                            closed_position.exit_horizon_label or intent.exit_horizon_label
+                        ),
+                        raw_event_id=closed_position.raw_event_id or intent.raw_event_id,
+                        signal_id=(
+                            closed_position.source_signal_id or intent.signal_id
+                        ),
+                        event_type=closed_position.event_type or intent.event_type,
+                        realized_pnl_usd=journal_entry.realized_pnl_usd,
+                        agent_id=self._identity.agent_id,
+                    )
+                    self._artifact_ledger.record_artifact(signal_outcome_artifact)
+                    artifacts.append(signal_outcome_artifact)
                 self._artifact_ledger.record_action(
                     action="portfolio_updated",
                     status="recorded",
@@ -1444,6 +1497,62 @@ class TradingApplication:
             self._handled_event_keys.add(event_key)
             unseen.append(event)
         return tuple(unseen)
+
+
+def _build_signal_discovery_summary(
+    artifacts: tuple[ValidationArtifact, ...] | list[ValidationArtifact],
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {"total_outcomes": 0, "by_horizon": {}}
+    for artifact in artifacts:
+        if artifact.kind != ArtifactKind.SIGNAL_OUTCOME:
+            continue
+        payload = artifact.payload
+        horizon = str(payload.get("exit_horizon_label") or "unlabeled")
+        bucket = cast(
+            dict[str, Any],
+            summary["by_horizon"].setdefault(
+                horizon,
+                {
+                    "sample_count": 0,
+                    "win_count": 0,
+                    "loss_count": 0,
+                    "flat_count": 0,
+                    "avg_realized_pnl_usd": 0.0,
+                    "avg_return_fraction": 0.0,
+                    "event_types": {},
+                },
+            ),
+        )
+        realized_pnl = float(payload.get("realized_pnl_usd", 0.0))
+        return_fraction = float(payload.get("realized_return_fraction", 0.0))
+        event_type = str(payload.get("event_type") or "unknown")
+        bucket["sample_count"] += 1
+        summary["total_outcomes"] += 1
+        bucket["avg_realized_pnl_usd"] += realized_pnl
+        bucket["avg_return_fraction"] += return_fraction
+        bucket["event_types"][event_type] = int(bucket["event_types"].get(event_type, 0)) + 1
+        if realized_pnl > 0:
+            bucket["win_count"] += 1
+        elif realized_pnl < 0:
+            bucket["loss_count"] += 1
+        else:
+            bucket["flat_count"] += 1
+
+    for bucket in cast(dict[str, dict[str, Any]], summary["by_horizon"]).values():
+        sample_count = int(bucket.get("sample_count", 0))
+        if sample_count <= 0:
+            continue
+        bucket["avg_realized_pnl_usd"] = round(
+            float(bucket["avg_realized_pnl_usd"]) / sample_count,
+            2,
+        )
+        bucket["avg_return_fraction"] = round(
+            float(bucket["avg_return_fraction"]) / sample_count,
+            6,
+        )
+        bucket["win_rate"] = round(float(bucket["win_count"]) / sample_count, 4)
+
+    return summary
 
 
 def build_identity_registry(

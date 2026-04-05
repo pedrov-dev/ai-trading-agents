@@ -40,6 +40,8 @@ class TradeJournalEntry:
     raw_event_id: str | None = None
     source_event_type: str | None = None
     exit_horizon_label: str | None = None
+    max_hold_minutes: int | None = None
+    exit_due_at: datetime | None = None
     intent_id: str | None = None
     client_order_id: str | None = None
     notes: tuple[str, ...] = ()
@@ -103,6 +105,8 @@ class TradeJournalEntry:
             raw_event_id=execution_result.request.raw_event_id,
             source_event_type=execution_result.request.event_type,
             exit_horizon_label=execution_result.request.exit_horizon_label,
+            max_hold_minutes=execution_result.request.max_hold_minutes,
+            exit_due_at=execution_result.request.exit_due_at,
             intent_id=execution_result.request.intent_id,
             client_order_id=execution_result.request.client_order_id,
             notes=tuple(str(item) for item in notes),
@@ -118,6 +122,8 @@ class TradeJournalEntry:
         raw_event_id = payload.get("raw_event_id")
         source_event_type = payload.get("source_event_type")
         exit_horizon_label = payload.get("exit_horizon_label")
+        max_hold_minutes = payload.get("max_hold_minutes")
+        exit_due_at = payload.get("exit_due_at")
         intent_id = payload.get("intent_id")
         client_order_id = payload.get("client_order_id")
         return cls(
@@ -145,6 +151,12 @@ class TradeJournalEntry:
             exit_horizon_label=(
                 str(exit_horizon_label) if exit_horizon_label is not None else None
             ),
+            max_hold_minutes=(
+                int(max_hold_minutes) if max_hold_minutes is not None else None
+            ),
+            exit_due_at=(
+                _parse_datetime(exit_due_at) if exit_due_at is not None else None
+            ),
             intent_id=str(intent_id) if intent_id is not None else None,
             client_order_id=(
                 str(client_order_id) if client_order_id is not None else None
@@ -171,6 +183,8 @@ class TradeJournalEntry:
             "raw_event_id": self.raw_event_id,
             "source_event_type": self.source_event_type,
             "exit_horizon_label": self.exit_horizon_label,
+            "max_hold_minutes": self.max_hold_minutes,
+            "exit_due_at": self.exit_due_at.isoformat() if self.exit_due_at else None,
             "intent_id": self.intent_id,
             "client_order_id": self.client_order_id,
             "notes": list(self.notes),
@@ -248,6 +262,13 @@ class LocalTradeJournal:
                 quantity=entry.quantity,
                 price=entry.price,
                 filled_at=entry.recorded_at,
+                position_id=entry.position_id,
+                source_signal_id=entry.signal_id,
+                raw_event_id=entry.raw_event_id,
+                event_type=entry.source_event_type,
+                exit_horizon_label=entry.exit_horizon_label,
+                max_hold_minutes=entry.max_hold_minutes,
+                exit_due_at=entry.exit_due_at,
             )
         return snapshot
 
@@ -291,13 +312,20 @@ def build_trade_journal_summary(
     open_positions: dict[str, dict[str, Any]] = {}
 
     for entry in ordered:
+        position_key = entry.position_id or entry.symbol_id
         if entry.position_side is None or entry.position_quantity <= 0:
-            open_positions.pop(entry.symbol_id, None)
+            open_positions.pop(position_key, None)
             continue
-        open_positions[entry.symbol_id] = {
+        open_positions[position_key] = {
+            "symbol_id": entry.symbol_id,
             "side": entry.position_side,
             "quantity": entry.position_quantity,
             "entry_price": entry.position_entry_price,
+            "signal_id": entry.signal_id,
+            "raw_event_id": entry.raw_event_id,
+            "exit_horizon_label": entry.exit_horizon_label,
+            "max_hold_minutes": entry.max_hold_minutes,
+            "exit_due_at": entry.exit_due_at.isoformat() if entry.exit_due_at else None,
             "last_event_type": entry.event_type,
             "recorded_at": entry.recorded_at.isoformat(),
         }

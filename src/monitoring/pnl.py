@@ -56,6 +56,9 @@ class PositionPnL:
     unrealized_pnl_usd: float
     unrealized_return_fraction: float
     as_of: datetime
+    position_id: str | None = None
+    source_signal_id: str | None = None
+    exit_horizon_label: str | None = None
     benchmark_comparisons: dict[str, BenchmarkComparison] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -65,6 +68,9 @@ class PositionPnL:
             "quantity": self.quantity,
             "entry_price": self.entry_price,
             "current_price": self.current_price,
+            "position_id": self.position_id,
+            "source_signal_id": self.source_signal_id,
+            "exit_horizon_label": self.exit_horizon_label,
             "entry_notional_usd": self.entry_notional_usd,
             "market_value_usd": self.market_value_usd,
             "unrealized_pnl_usd": self.unrealized_pnl_usd,
@@ -196,7 +202,8 @@ def build_pnl_snapshot(
             if price_quote is not None
             else {}
         )
-        position_pnl[position.symbol_id] = PositionPnL(
+        position_key = position.position_id or position.symbol_id
+        position_pnl[position_key] = PositionPnL(
             symbol_id=position.symbol_id,
             side=position.side,
             quantity=position.quantity,
@@ -207,6 +214,9 @@ def build_pnl_snapshot(
             unrealized_pnl_usd=unrealized_pnl,
             unrealized_return_fraction=unrealized_return_fraction,
             as_of=observed_at,
+            position_id=position.position_id,
+            source_signal_id=position.source_signal_id,
+            exit_horizon_label=position.exit_horizon_label,
             benchmark_comparisons=benchmark_comparisons,
         )
         if entry_notional > 0 and benchmark_comparisons:
