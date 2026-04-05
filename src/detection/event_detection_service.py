@@ -4,7 +4,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from detection.event_detection import EventDetector
+from detection.event_detection import (
+    DetectedEvent,
+    EventDetector,
+    normalize_payload_text,
+    score_event_novelty,
+)
 from detection.event_detection_postgres import EventDetectionRepository
 from storage.raw_ingestion import RawEventsRepository
 
@@ -45,6 +50,7 @@ class EventDetectionService:
         )
 
         processed = 0
+        historical_events = list(self._event_detection_repository.list_detected_events())
         for row in pending:
             raw_event = RawEventForClassification(
                 id=str(row["id"]),
@@ -60,16 +66,41 @@ class EventDetectionService:
             )
 
             if matches:
+                narrative_text = normalize_payload_text(raw_event.payload_preview)
                 for match in matches:
+                    detected_at = match.detected_at or datetime.now(UTC)
+                    novelty_score, repeat_count, narrative_key = score_event_novelty(
+                        event_type=match.event_type,
+                        text=narrative_text,
+                        matched_text=match.matched_text,
+                        detected_at=detected_at,
+                        historical_events=historical_events,
+                    )
                     self._event_detection_repository.insert_detected_event(
                         raw_event_id=raw_event.id,
                         event_type=match.event_type,
                         rule_name=match.rule_name,
                         confidence=match.confidence,
-                        detected_at=match.detected_at or datetime.now(UTC),
+                        detected_at=detected_at,
                         metadata={
                             "matched_text": match.matched_text,
+                            "novelty_score": novelty_score,
+                            "repeat_count": repeat_count,
+                            "narrative_key": narrative_key,
                         },
+                    )
+                    historical_events.append(
+                        DetectedEvent(
+                            raw_event_id=raw_event.id,
+                            event_type=match.event_type,
+                            rule_name=match.rule_name,
+                            confidence=match.confidence,
+                            matched_text=match.matched_text,
+                            detected_at=detected_at,
+                            novelty_score=novelty_score,
+                            repeat_count=repeat_count,
+                            narrative_key=narrative_key,
+                        )
                     )
                 self._raw_events_repository.transition_raw_event_status(
                     source_type=raw_event.source_type,

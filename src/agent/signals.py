@@ -128,6 +128,9 @@ class Signal:
     signal_id: str | None = None
     thesis_fingerprint: str | None = None
     thesis_tokens: tuple[str, ...] = ()
+    event_novelty_score: float = 1.0
+    event_repeat_count: int = 0
+    narrative_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -262,10 +265,21 @@ def build_signal(*, event: DetectedEvent, quote: PriceQuote) -> Signal:
     aligned_move = max(price_move, 0.0) if side == "buy" else max(-price_move, 0.0)
     price_bonus = min(aligned_move * 3.0, 0.12)
     volatility_multiplier, volatility_rationale = _volatility_adjustment(quote)
-    effective_confidence = min(max(base_confidence * volatility_multiplier, 0.0), 1.0)
+    event_novelty_score, novelty_rationale = _event_novelty_adjustment(event)
+    novelty_multiplier = 0.65 + (event_novelty_score * 0.35)
+    effective_confidence = min(
+        max(base_confidence * volatility_multiplier * novelty_multiplier, 0.0),
+        1.0,
+    )
     score = min(
         1.0,
-        round((effective_confidence * 0.72) + (event_bias * 0.18) + price_bonus, 4),
+        round(
+            (effective_confidence * 0.7)
+            + (event_bias * 0.18)
+            + price_bonus
+            + (event_novelty_score * 0.04),
+            4,
+        ),
     )
 
     bias_label = "bullish" if side == "buy" else "bearish"
@@ -274,6 +288,8 @@ def build_signal(*, event: DetectedEvent, quote: PriceQuote) -> Signal:
         f"Event confidence contributed {base_confidence:.2f} to the opportunity score.",
         f"Price confirmation move: {price_move * 100:.2f}% from the session open.",
     ]
+    if novelty_rationale is not None:
+        rationale_items.append(novelty_rationale)
     if volatility_rationale is not None:
         rationale_items.append(volatility_rationale)
     rationale = tuple(rationale_items)
@@ -306,6 +322,9 @@ def build_signal(*, event: DetectedEvent, quote: PriceQuote) -> Signal:
             thesis_tokens=thesis_tokens,
         ),
         thesis_tokens=thesis_tokens,
+        event_novelty_score=event_novelty_score,
+        event_repeat_count=max(event.repeat_count, 0),
+        narrative_key=event.narrative_key,
     )
 
 
@@ -361,6 +380,25 @@ def build_trade_intent(
         max_hold_minutes=max_hold_minutes,
         exit_due_at=horizon_due_at,
         position_id=position_id,
+    )
+
+
+def _event_novelty_adjustment(event: DetectedEvent) -> tuple[float, str | None]:
+    if event.novelty_score is None:
+        return 1.0, None
+
+    novelty_score = min(max(event.novelty_score, 0.0), 1.0)
+    repeat_count = max(event.repeat_count, 0)
+    if novelty_score >= 0.95 and repeat_count == 0:
+        return (
+            novelty_score,
+            "Fresh narrative detected; first occurrence kept the novelty score high.",
+        )
+
+    return (
+        novelty_score,
+        "Repeated narrative lowered novelty to "
+        f"{novelty_score:.2f} after {repeat_count} prior occurrence(s).",
     )
 
 

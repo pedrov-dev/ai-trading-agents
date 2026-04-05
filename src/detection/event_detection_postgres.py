@@ -52,6 +52,9 @@ class PostgresEventDetectionRepository:
         for row in rows:
             metadata = row[5] if isinstance(row[5], dict) else {}
             matched_text = metadata.get("matched_text") if metadata else None
+            novelty_score = metadata.get("novelty_score") if metadata else None
+            repeat_count = metadata.get("repeat_count") if metadata else 0
+            narrative_key = metadata.get("narrative_key") if metadata else None
             events.append(
                 DetectedEvent(
                     raw_event_id=str(row[0]),
@@ -60,6 +63,9 @@ class PostgresEventDetectionRepository:
                     confidence=float(row[3]),
                     detected_at=row[4],
                     matched_text=str(matched_text) if matched_text is not None else None,
+                    novelty_score=float(novelty_score) if novelty_score is not None else None,
+                    repeat_count=int(repeat_count or 0),
+                    narrative_key=str(narrative_key) if narrative_key is not None else None,
                 )
             )
         return tuple(events)

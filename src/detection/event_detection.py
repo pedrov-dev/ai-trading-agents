@@ -17,6 +17,9 @@ class DetectedEvent:
     confidence: float
     matched_text: str | None = None
     detected_at: datetime | None = None
+    novelty_score: float | None = None
+    repeat_count: int = 0
+    narrative_key: str | None = None
 
 
 class EventDetector(Protocol):
@@ -29,6 +32,210 @@ class EventDetector(Protocol):
         payload_preview: dict[str, Any],
     ) -> list[DetectedEvent]:
         ...
+
+
+_NARRATIVE_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "a",
+        "an",
+        "after",
+        "again",
+        "another",
+        "as",
+        "back",
+        "desks",
+        "focus",
+        "for",
+        "in",
+        "into",
+        "is",
+        "more",
+        "of",
+        "on",
+        "say",
+        "says",
+        "same",
+        "the",
+        "their",
+        "this",
+        "to",
+        "up",
+    }
+)
+
+_NARRATIVE_ALIASES: dict[str, str] = {
+    "approved": "approval",
+    "approves": "approval",
+    "approving": "approval",
+    "approval": "approval",
+    "approve": "approval",
+    "btc": "bitcoin",
+    "xbt": "bitcoin",
+    "bitcoin": "bitcoin",
+    "eth": "ether",
+    "ethereum": "ether",
+    "ether": "ether",
+    "etf": "etf",
+    "filing": "filing",
+    "filings": "filing",
+    "delay": "delay",
+    "delayed": "delay",
+    "postpone": "delay",
+    "postpones": "delay",
+    "rumor": "rumor",
+    "rumours": "rumor",
+    "rumors": "rumor",
+    "resurfaces": "rumor",
+    "resurfaced": "rumor",
+    "sec": "regulation",
+    "regulator": "regulation",
+    "regulators": "regulation",
+    "cftc": "regulation",
+    "hack": "security",
+    "hacked": "security",
+    "breach": "security",
+    "exploit": "security",
+    "whale": "whale",
+    "wallet": "whale",
+    "listing": "listing",
+    "listed": "listing",
+    "outage": "outage",
+    "halted": "outage",
+    "upgrade": "upgrade",
+    "fork": "upgrade",
+    "macro": "macro",
+    "fed": "macro",
+    "inflation": "macro",
+    "cpi": "macro",
+    "rates": "macro",
+    "rate": "macro",
+    "breakout": "technical",
+    "breakdowns": "technical",
+    "breakdown": "technical",
+}
+
+_PRIORITY_NARRATIVE_TOKENS: tuple[str, ...] = (
+    "approval",
+    "delay",
+    "security",
+    "listing",
+    "macro",
+    "outage",
+    "regulation",
+    "technical",
+    "upgrade",
+    "whale",
+    "bitcoin",
+    "ether",
+    "etf",
+    "rumor",
+    "filing",
+)
+
+_NARRATIVE_PRIORITY_ORDER: dict[str, int] = {
+    token: index for index, token in enumerate(_PRIORITY_NARRATIVE_TOKENS)
+}
+
+
+def normalize_payload_text(payload_preview: dict[str, Any]) -> str:
+    texts: list[str] = []
+
+    for key in ("title", "headline", "description", "text", "summary"):
+        value = payload_preview.get(key)
+        if isinstance(value, str) and value.strip():
+            texts.append(value.strip())
+
+    return " ".join(texts)
+
+
+def _normalize_narrative_token(token: str) -> str | None:
+    normalized = _NARRATIVE_ALIASES.get(token.lower().strip(), token.lower().strip())
+    if len(normalized) <= 2 or normalized in _NARRATIVE_STOPWORDS:
+        return None
+    return normalized
+
+
+def build_narrative_key(
+    *,
+    event_type: str,
+    text: str,
+    matched_text: str | None = None,
+) -> str:
+    token_source = " ".join(part for part in (event_type, matched_text or "", text) if part)
+    priority_tokens: list[str] = []
+    fallback_tokens: list[str] = []
+
+    for token in re.findall(r"[a-z0-9]+", token_source.lower()):
+        normalized = _normalize_narrative_token(token)
+        if normalized is None:
+            continue
+        if normalized in _PRIORITY_NARRATIVE_TOKENS:
+            priority_tokens.append(normalized)
+        else:
+            fallback_tokens.append(normalized)
+
+    selected_tokens = priority_tokens or fallback_tokens or [event_type.strip().lower()]
+    stable_tokens = tuple(
+        sorted(
+            dict.fromkeys(selected_tokens),
+            key=lambda value: (_NARRATIVE_PRIORITY_ORDER.get(value, 999), value),
+        )[:4]
+    )
+    return f"{event_type.strip().lower()}:{'-'.join(stable_tokens)}"
+
+
+def score_event_novelty(
+    *,
+    event_type: str,
+    text: str,
+    matched_text: str | None,
+    detected_at: datetime | None,
+    historical_events: tuple[DetectedEvent, ...] | list[DetectedEvent],
+) -> tuple[float, int, str]:
+    narrative_key = build_narrative_key(
+        event_type=event_type,
+        text=text,
+        matched_text=matched_text,
+    )
+
+    repeat_count = 0
+    recency_penalty = 0.0
+    reference_time = detected_at or datetime.now(UTC)
+
+    for historical_event in historical_events:
+        if historical_event.event_type != event_type:
+            continue
+
+        historical_key = historical_event.narrative_key or build_narrative_key(
+            event_type=historical_event.event_type,
+            text=historical_event.matched_text or historical_event.rule_name,
+            matched_text=historical_event.matched_text,
+        )
+        if historical_key != narrative_key:
+            continue
+
+        repeat_count += 1
+        if historical_event.detected_at is None:
+            recency_penalty += 0.5
+            continue
+
+        age_hours = max(
+            (reference_time - historical_event.detected_at).total_seconds() / 3600.0,
+            0.0,
+        )
+        if age_hours <= 24:
+            recency_penalty += 1.0
+        elif age_hours <= 24 * 7:
+            recency_penalty += 0.6
+        else:
+            recency_penalty += 0.25
+
+    if repeat_count == 0:
+        novelty_score = 1.0
+    else:
+        novelty_score = round(max(0.15, 1.0 / (1.0 + recency_penalty)), 4)
+
+    return novelty_score, repeat_count, narrative_key
 
 
 @dataclass(frozen=True)
@@ -61,7 +268,7 @@ class RuleBasedEventDetector:
 
     def detect(self, *, source_type: str, payload_preview: dict[str, Any]) -> list[DetectedEvent]:
         del source_type
-        text = self._normalize_payload_text(payload_preview)
+        text = normalize_payload_text(payload_preview)
         if not text:
             return []
 
@@ -80,21 +287,15 @@ class RuleBasedEventDetector:
                     confidence=rule.confidence,
                     matched_text=matched_text,
                     detected_at=datetime.now(UTC),
+                    narrative_key=build_narrative_key(
+                        event_type=rule.event_type,
+                        text=text,
+                        matched_text=matched_text,
+                    ),
                 )
             )
 
         return detected
-
-    @staticmethod
-    def _normalize_payload_text(payload_preview: dict[str, Any]) -> str:
-        texts: list[str] = []
-
-        for key in ("title", "headline", "description", "text", "summary"):
-            value = payload_preview.get(key)
-            if isinstance(value, str) and value.strip():
-                texts.append(value.strip())
-
-        return " ".join(texts)
 
     @staticmethod
     def _default_rules() -> list[EventRule]:

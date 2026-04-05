@@ -438,7 +438,11 @@ class SimpleEventDrivenStrategy:
 
         for state in recent_theses:
             similarity = _thesis_similarity(signal=signal, state=state)
-            if similarity > best_similarity:
+            if similarity > best_similarity or (
+                similarity == best_similarity
+                and best_state is not None
+                and state.repeat_count > best_state.repeat_count
+            ):
                 best_similarity = similarity
                 best_state = state
 
@@ -461,8 +465,12 @@ class SimpleEventDrivenStrategy:
             recent_theses=recent_theses,
         )
         repeat_count = 0 if best_state is None else best_state.repeat_count + 1
-        novelty_score = _clamp_score(
+        persistent_event_novelty = _clamp_score(signal.event_novelty_score)
+        session_novelty_score = _clamp_score(
             1.0 - min(1.0, best_similarity * (0.85 + (0.05 * repeat_count)))
+        )
+        novelty_score = _clamp_score(
+            (persistent_event_novelty * 0.7) + (session_novelty_score * 0.3)
         )
         risk_reward_score = self._risk_reward_score(
             signal=signal,

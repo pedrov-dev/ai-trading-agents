@@ -165,6 +165,9 @@ class RuntimeCycleResult:
                     "rule_name": event.rule_name,
                     "confidence": event.confidence,
                     "matched_text": event.matched_text,
+                    "novelty_score": event.novelty_score,
+                    "repeat_count": event.repeat_count,
+                    "narrative_key": event.narrative_key,
                     "detected_at": event.detected_at.isoformat()
                     if event.detected_at
                     else None,
@@ -263,6 +266,9 @@ class RuntimeCycleResult:
                     "event_type": event.event_type,
                     "rule_name": event.rule_name,
                     "confidence": event.confidence,
+                    "novelty_score": event.novelty_score,
+                    "repeat_count": event.repeat_count,
+                    "narrative_key": event.narrative_key,
                     "detected_at": event.detected_at.isoformat()
                     if event.detected_at
                     else None,
@@ -446,6 +452,9 @@ class LocalArtifactLedger:
                     "event_type": event.event_type,
                     "rule_name": event.rule_name,
                     "confidence": event.confidence,
+                    "novelty_score": event.novelty_score,
+                    "repeat_count": event.repeat_count,
+                    "narrative_key": event.narrative_key,
                     "detected_at": event.detected_at.isoformat() if event.detected_at else None,
                 }
                 for event in detected_events[-10:]

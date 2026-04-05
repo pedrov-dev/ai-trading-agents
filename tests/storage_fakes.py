@@ -183,9 +183,19 @@ class StubEventDetectionRepository:
         metadata: dict[str, Any] | None = None,
     ) -> None:
         matched_text = None
+        novelty_score = None
+        repeat_count = 0
+        narrative_key = None
         if metadata is not None:
             candidate = metadata.get("matched_text")
             matched_text = str(candidate) if candidate is not None else None
+            novelty_candidate = metadata.get("novelty_score")
+            novelty_score = float(novelty_candidate) if novelty_candidate is not None else None
+            repeat_count = int(metadata.get("repeat_count") or 0)
+            narrative_key_candidate = metadata.get("narrative_key")
+            narrative_key = (
+                str(narrative_key_candidate) if narrative_key_candidate is not None else None
+            )
 
         self._events.append(
             DetectedEvent(
@@ -195,6 +205,9 @@ class StubEventDetectionRepository:
                 confidence=confidence,
                 matched_text=matched_text,
                 detected_at=detected_at,
+                novelty_score=novelty_score,
+                repeat_count=repeat_count,
+                narrative_key=narrative_key,
             )
         )
 

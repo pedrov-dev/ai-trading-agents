@@ -179,3 +179,45 @@ def test_build_signal_strengthens_when_volatility_is_high() -> None:
     assert high_vol_signal.confidence > neutral_signal.confidence
     assert high_vol_signal.score > neutral_signal.score
     assert any("high volatility" in reason.lower() for reason in high_vol_signal.rationale)
+
+
+def test_build_signal_penalizes_repeated_low_novelty_narrative() -> None:
+    fresh_event = DetectedEvent(
+        raw_event_id="evt-fresh",
+        event_type="ETF_APPROVAL",
+        rule_name="etf_approval",
+        confidence=0.88,
+        matched_text="bitcoin etf approval rumor",
+        detected_at=datetime(2026, 4, 3, tzinfo=UTC),
+        novelty_score=1.0,
+        repeat_count=0,
+        narrative_key="etf-approval-rumor",
+    )
+    repeated_event = DetectedEvent(
+        raw_event_id="evt-repeat",
+        event_type="ETF_APPROVAL",
+        rule_name="etf_approval",
+        confidence=0.88,
+        matched_text="bitcoin etf approval rumor again",
+        detected_at=datetime(2026, 4, 3, 1, tzinfo=UTC),
+        novelty_score=0.2,
+        repeat_count=4,
+        narrative_key="etf-approval-rumor",
+    )
+    quote = PriceQuote(
+        symbol_id="btc_usd",
+        current=68_000.0,
+        open=67_200.0,
+        high=68_500.0,
+        low=66_900.0,
+        prev_close=67_000.0,
+        timestamp=1712100000,
+        asset_class="spot",
+    )
+
+    fresh_signal = build_signal(event=fresh_event, quote=quote)
+    repeated_signal = build_signal(event=repeated_event, quote=quote)
+
+    assert repeated_signal.score < fresh_signal.score
+    assert repeated_signal.confidence < fresh_signal.confidence
+    assert any("repeated narrative" in reason.lower() for reason in repeated_signal.rationale)
