@@ -122,6 +122,25 @@ class ReputationEngine:
                 delta = -6.0
                 failed_executions += 1
                 reason = f"Execution failed with status={status}."
+        elif artifact.kind == ArtifactKind.SIGNAL_OUTCOME:
+            pnl_value = float(artifact.payload.get("realized_pnl_usd", 0.0))
+            cumulative_pnl = round(cumulative_pnl + pnl_value, 2)
+            if pnl_value > 0:
+                delta = min(pnl_value / 25.0, 4.0)
+                win_count += 1
+                reason = (
+                    "Positive signal outcome recorded for horizon "
+                    f"{artifact.payload.get('exit_horizon_label', 'scheduled')}."
+                )
+            elif pnl_value < 0:
+                delta = -min(abs(pnl_value) / 25.0, 4.0)
+                loss_count += 1
+                reason = (
+                    "Negative signal outcome recorded for horizon "
+                    f"{artifact.payload.get('exit_horizon_label', 'scheduled')}."
+                )
+            else:
+                reason = "Flat signal outcome recorded."
         elif artifact.kind == ArtifactKind.PERFORMANCE_CHECKPOINT:
             pnl_value = float(artifact.payload.get("realized_pnl_today", 0.0))
             cumulative_pnl = round(cumulative_pnl + pnl_value, 2)

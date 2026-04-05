@@ -44,6 +44,13 @@ class OrderRequest:
     score: float
     rationale: tuple[str, ...]
     generated_at: datetime
+    signal_id: str | None = None
+    raw_event_id: str | None = None
+    event_type: str | None = None
+    exit_horizon_label: str | None = None
+    max_hold_minutes: int | None = None
+    exit_due_at: datetime | None = None
+    position_id: str | None = None
     requested_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     execution_mode: ExecutionMode = ExecutionMode.DRY_RUN
     status: OrderStatus = OrderStatus.REQUESTED
@@ -61,8 +68,11 @@ class OrderRequest:
     ) -> OrderRequest:
         """Build a stable order request from one strategy-produced trade intent."""
         resolved_requested_at = requested_at or datetime.now(UTC)
+        intent_suffix = (intent.position_id or intent.exit_horizon_label or "core").replace(
+            ":", "-"
+        )
         resolved_intent_id = intent_id or (
-            f"intent-{intent.symbol_id}-{resolved_requested_at.strftime('%Y%m%d%H%M%S')}"
+            f"intent-{intent.symbol_id}-{intent_suffix}-{resolved_requested_at.strftime('%Y%m%d%H%M%S')}"
         )
         resolved_client_order_id = client_order_id or (
             f"{resolved_intent_id}-{resolved_requested_at.strftime('%H%M%S')}"
@@ -79,6 +89,13 @@ class OrderRequest:
             score=intent.score,
             rationale=intent.rationale,
             generated_at=intent.generated_at,
+            signal_id=intent.signal_id,
+            raw_event_id=intent.raw_event_id,
+            event_type=intent.event_type,
+            exit_horizon_label=intent.exit_horizon_label,
+            max_hold_minutes=intent.max_hold_minutes,
+            exit_due_at=intent.exit_due_at,
+            position_id=intent.position_id,
             requested_at=resolved_requested_at,
             execution_mode=execution_mode,
         )
@@ -97,6 +114,13 @@ class OrderRequest:
             "score": self.score,
             "rationale": list(self.rationale),
             "generated_at": self.generated_at.isoformat(),
+            "signal_id": self.signal_id,
+            "raw_event_id": self.raw_event_id,
+            "event_type": self.event_type,
+            "exit_horizon_label": self.exit_horizon_label,
+            "max_hold_minutes": self.max_hold_minutes,
+            "exit_due_at": self.exit_due_at.isoformat() if self.exit_due_at else None,
+            "position_id": self.position_id,
             "requested_at": self.requested_at.isoformat(),
             "execution_mode": self.execution_mode.value,
             "status": self.status.value,

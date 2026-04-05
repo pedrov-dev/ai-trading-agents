@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from detection.event_detection import DetectedEvent
@@ -36,6 +37,7 @@ _PREFERRED_SYMBOLS: tuple[str, ...] = ("btc_usd", "eth_usd", "sol_usd", "xrp_usd
 class Signal:
     """Scored trading opportunity derived from a detected event and price quote."""
 
+    signal_id: str
     raw_event_id: str
     event_type: str
     symbol_id: str
@@ -59,6 +61,13 @@ class TradeIntent:
     score: float
     rationale: tuple[str, ...]
     generated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    signal_id: str | None = None
+    raw_event_id: str | None = None
+    event_type: str | None = None
+    exit_horizon_label: str | None = None
+    max_hold_minutes: int | None = None
+    exit_due_at: datetime | None = None
+    position_id: str | None = None
 
 
 def infer_trade_side(event_type: str) -> TradeSide | None:
@@ -110,7 +119,14 @@ def build_signal(*, event: DetectedEvent, quote: PriceQuote) -> Signal:
         f"Price confirmation move: {price_move * 100:.2f}% from the session open.",
     )
 
+    generated_at = event.detected_at or datetime.now(UTC)
     return Signal(
+        signal_id=_build_signal_id(
+            raw_event_id=event.raw_event_id,
+            event_type=event.event_type,
+            symbol_id=quote.symbol_id,
+            generated_at=generated_at,
+        ),
         raw_event_id=event.raw_event_id,
         event_type=event.event_type,
         symbol_id=quote.symbol_id,
@@ -118,7 +134,7 @@ def build_signal(*, event: DetectedEvent, quote: PriceQuote) -> Signal:
         confidence=event.confidence,
         score=score,
         current_price=quote.current,
-        generated_at=event.detected_at or datetime.now(UTC),
+        generated_at=generated_at,
         rationale=rationale,
     )
 
@@ -128,10 +144,17 @@ def build_trade_intent(
     signal: Signal,
     notional_usd: float,
     rationale_suffix: tuple[str, ...] = (),
+    exit_horizon_label: str | None = None,
+    max_hold_minutes: int | None = None,
+    position_id: str | None = None,
 ) -> TradeIntent:
     quantity = 0.0
     if signal.current_price > 0:
         quantity = round(notional_usd / signal.current_price, 8)
+
+    horizon_due_at = None
+    if max_hold_minutes is not None and max_hold_minutes > 0:
+        horizon_due_at = signal.generated_at + timedelta(minutes=max_hold_minutes)
 
     rationale = signal.rationale + rationale_suffix + (
         f"Target notional set to ${notional_usd:,.2f}.",
@@ -145,6 +168,13 @@ def build_trade_intent(
         score=signal.score,
         rationale=rationale,
         generated_at=signal.generated_at,
+        signal_id=signal.signal_id,
+        raw_event_id=signal.raw_event_id,
+        event_type=signal.event_type,
+        exit_horizon_label=exit_horizon_label,
+        max_hold_minutes=max_hold_minutes,
+        exit_due_at=horizon_due_at,
+        position_id=position_id,
     )
 
 
@@ -152,3 +182,18 @@ def _price_momentum(quote: PriceQuote) -> float:
     if quote.open <= 0:
         return 0.0
     return (quote.current - quote.open) / quote.open
+
+
+def _build_signal_id(
+    *,
+    raw_event_id: str,
+    event_type: str,
+    symbol_id: str,
+    generated_at: datetime,
+) -> str:
+    digest = hashlib.sha256(
+        f"{raw_event_id}|{event_type}|{symbol_id}|{generated_at.isoformat()}".encode(
+            "utf-8"
+        )
+    ).hexdigest()[:12]
+    return f"signal-{digest}"

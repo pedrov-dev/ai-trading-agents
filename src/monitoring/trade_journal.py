@@ -35,6 +35,11 @@ class TradeJournalEntry:
     position_side: str | None = None
     position_quantity: float = 0.0
     position_entry_price: float | None = None
+    position_id: str | None = None
+    signal_id: str | None = None
+    raw_event_id: str | None = None
+    source_event_type: str | None = None
+    exit_horizon_label: str | None = None
     intent_id: str | None = None
     client_order_id: str | None = None
     notes: tuple[str, ...] = ()
@@ -54,10 +59,12 @@ class TradeJournalEntry:
             raise ValueError("A fill is required to build a trade journal entry.")
 
         before_position = before_portfolio.position_for_symbol(
-            execution_result.request.symbol_id
+            execution_result.request.symbol_id,
+            position_id=execution_result.request.position_id,
         )
         after_position = after_portfolio.position_for_symbol(
-            execution_result.request.symbol_id
+            execution_result.request.symbol_id,
+            position_id=execution_result.request.position_id,
         )
         realized_change = round(
             after_portfolio.realized_pnl_today - before_portfolio.realized_pnl_today,
@@ -87,6 +94,15 @@ class TradeJournalEntry:
                 if after_position is not None
                 else None
             ),
+            position_id=(
+                execution_result.request.position_id
+                or (after_position.position_id if after_position is not None else None)
+                or (before_position.position_id if before_position is not None else None)
+            ),
+            signal_id=execution_result.request.signal_id,
+            raw_event_id=execution_result.request.raw_event_id,
+            source_event_type=execution_result.request.event_type,
+            exit_horizon_label=execution_result.request.exit_horizon_label,
             intent_id=execution_result.request.intent_id,
             client_order_id=execution_result.request.client_order_id,
             notes=tuple(str(item) for item in notes),
@@ -97,6 +113,11 @@ class TradeJournalEntry:
         """Rehydrate a journal entry from JSON-loaded data."""
         position_entry_price = payload.get("position_entry_price")
         position_side = payload.get("position_side")
+        position_id = payload.get("position_id")
+        signal_id = payload.get("signal_id")
+        raw_event_id = payload.get("raw_event_id")
+        source_event_type = payload.get("source_event_type")
+        exit_horizon_label = payload.get("exit_horizon_label")
         intent_id = payload.get("intent_id")
         client_order_id = payload.get("client_order_id")
         return cls(
@@ -114,6 +135,15 @@ class TradeJournalEntry:
                 float(position_entry_price)
                 if position_entry_price is not None
                 else None
+            ),
+            position_id=str(position_id) if position_id is not None else None,
+            signal_id=str(signal_id) if signal_id is not None else None,
+            raw_event_id=str(raw_event_id) if raw_event_id is not None else None,
+            source_event_type=(
+                str(source_event_type) if source_event_type is not None else None
+            ),
+            exit_horizon_label=(
+                str(exit_horizon_label) if exit_horizon_label is not None else None
             ),
             intent_id=str(intent_id) if intent_id is not None else None,
             client_order_id=(
@@ -136,6 +166,11 @@ class TradeJournalEntry:
             "position_side": self.position_side,
             "position_quantity": self.position_quantity,
             "position_entry_price": self.position_entry_price,
+            "position_id": self.position_id,
+            "signal_id": self.signal_id,
+            "raw_event_id": self.raw_event_id,
+            "source_event_type": self.source_event_type,
+            "exit_horizon_label": self.exit_horizon_label,
             "intent_id": self.intent_id,
             "client_order_id": self.client_order_id,
             "notes": list(self.notes),

@@ -28,6 +28,23 @@ class StrategyConfig:
 
 
 @dataclass(frozen=True)
+class ExitHorizon:
+    """One explicit time window used to evaluate and close a signal tranche."""
+
+    label: str
+    hold_minutes: int
+    weight: float = 0.25
+
+
+_DEFAULT_EXIT_HORIZONS: tuple[ExitHorizon, ...] = (
+    ExitHorizon(label="5m", hold_minutes=5, weight=0.25),
+    ExitHorizon(label="30m", hold_minutes=30, weight=0.25),
+    ExitHorizon(label="4h", hold_minutes=240, weight=0.25),
+    ExitHorizon(label="24h", hold_minutes=1440, weight=0.25),
+)
+
+
+@dataclass(frozen=True)
 class ExitConfig:
     """Basic close-out rules for autonomous paper-trading exits."""
 
@@ -35,6 +52,7 @@ class ExitConfig:
     stop_loss_fraction: float = 0.02
     max_hold_minutes: int = 180
     close_on_opposite_event: bool = True
+    target_horizons: tuple[ExitHorizon, ...] = _DEFAULT_EXIT_HORIZONS
 
 
 class SimpleEventDrivenStrategy:
@@ -78,6 +96,7 @@ class SimpleEventDrivenStrategy:
                 ranked_signals[signal.symbol_id] = signal
 
         intents: list[TradeIntent] = []
+        selected_signal_count = 0
 
         for signal in sorted(
             ranked_signals.values(),
@@ -99,16 +118,18 @@ class SimpleEventDrivenStrategy:
             if not risk_result.approved:
                 continue
 
-            intents.append(
-                build_trade_intent(
+            intents.extend(
+                _build_horizon_trade_intents(
                     signal=signal,
-                    notional_usd=risk_result.allowed_notional,
+                    allowed_notional=risk_result.allowed_notional,
                     rationale_suffix=risk_result.notes
                     + (f"Event {signal.event_type} cleared all configured risk checks.",),
+                    exit_config=self._exit_config,
                 )
             )
+            selected_signal_count += 1
 
-            if len(intents) >= self._config.max_intents_per_cycle:
+            if selected_signal_count >= self._config.max_intents_per_cycle:
                 break
 
         return intents
@@ -158,7 +179,13 @@ class SimpleEventDrivenStrategy:
                 rationale.append(
                     f"Stop loss hit at {return_fraction * 100:.2f}% unrealized return."
                 )
-            if (
+            if position.exit_due_at is not None and checked_at >= position.exit_due_at:
+                rationale.append(
+                    "Exit horizon "
+                    f"{position.exit_horizon_label or 'scheduled'} reached after "
+                    f"{hold_minutes:.1f} minutes."
+                )
+            elif (
                 self._exit_config.max_hold_minutes > 0
                 and hold_minutes >= self._exit_config.max_hold_minutes
             ):
@@ -188,6 +215,13 @@ class SimpleEventDrivenStrategy:
                     score=1.0,
                     rationale=tuple(rationale),
                     generated_at=checked_at,
+                    signal_id=position.source_signal_id,
+                    raw_event_id=position.raw_event_id,
+                    event_type=position.event_type,
+                    exit_horizon_label=position.exit_horizon_label,
+                    max_hold_minutes=position.max_hold_minutes,
+                    exit_due_at=position.exit_due_at,
+                    position_id=position.position_id,
                 )
             )
 
@@ -202,8 +236,9 @@ class SimpleEventDrivenStrategy:
     ) -> RiskCheckResult:
         """Re-run the same conservative risk guardrails immediately before execution."""
         signal = Signal(
-            raw_event_id=f"runtime-recheck:{intent.symbol_id}",
-            event_type="RUNTIME_RECHECK",
+            signal_id=intent.signal_id or f"runtime-recheck:{intent.symbol_id}",
+            raw_event_id=intent.raw_event_id or f"runtime-recheck:{intent.symbol_id}",
+            event_type=intent.event_type or "RUNTIME_RECHECK",
             symbol_id=intent.symbol_id,
             side=intent.side,
             confidence=intent.score,
@@ -212,7 +247,10 @@ class SimpleEventDrivenStrategy:
             generated_at=intent.generated_at,
             rationale=intent.rationale,
         )
-        existing_position = portfolio.position_for_symbol(intent.symbol_id)
+        existing_position = portfolio.position_for_symbol(
+            intent.symbol_id,
+            position_id=intent.position_id,
+        )
         reduce_only = existing_position is not None and (
             (existing_position.side == "long" and intent.side == "sell")
             or (existing_position.side == "short" and intent.side == "buy")
@@ -224,6 +262,59 @@ class SimpleEventDrivenStrategy:
             now=now,
             reduce_only=reduce_only,
         )
+
+
+def _build_horizon_trade_intents(
+    *,
+    signal: Signal,
+    allowed_notional: float,
+    rationale_suffix: tuple[str, ...],
+    exit_config: ExitConfig,
+) -> list[TradeIntent]:
+    horizons = tuple(horizon for horizon in exit_config.target_horizons if horizon.weight > 0)
+    if not horizons:
+        return [
+            build_trade_intent(
+                signal=signal,
+                notional_usd=allowed_notional,
+                rationale_suffix=rationale_suffix,
+                max_hold_minutes=exit_config.max_hold_minutes,
+                position_id=f"{signal.signal_id}:core",
+            )
+        ]
+
+    intents: list[TradeIntent] = []
+    remaining_notional = round(allowed_notional, 2)
+    total_weight = sum(horizon.weight for horizon in horizons)
+
+    for index, horizon in enumerate(horizons):
+        if index == len(horizons) - 1:
+            tranche_notional = remaining_notional
+        else:
+            tranche_notional = round(
+                allowed_notional * (horizon.weight / total_weight),
+                2,
+            )
+            remaining_notional = round(remaining_notional - tranche_notional, 2)
+
+        if tranche_notional <= 0:
+            continue
+
+        intents.append(
+            build_trade_intent(
+                signal=signal,
+                notional_usd=tranche_notional,
+                rationale_suffix=rationale_suffix
+                + (
+                    f"Exit tranche assigned to the {horizon.label} evaluation window.",
+                ),
+                exit_horizon_label=horizon.label,
+                max_hold_minutes=horizon.hold_minutes,
+                position_id=f"{signal.signal_id}:{horizon.label}",
+            )
+        )
+
+    return intents
 
 
 def _position_return_fraction(*, position: Position, current_price: float) -> float:

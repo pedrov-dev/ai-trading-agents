@@ -254,6 +254,77 @@ def test_kraken_paper_app_runs_end_to_end_and_writes_demo_artifacts(tmp_path: Pa
     assert (tmp_path / "artifacts" / "run_summary.json").exists()
 
 
+def test_kraken_paper_app_records_signal_outcomes_by_horizon_on_exit(tmp_path: Path) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_runner(command: tuple[str, ...], timeout_seconds: int) -> CommandRunResult:
+        assert timeout_seconds == 15
+        calls.append(command)
+        return CommandRunResult(
+            exit_code=0,
+            stdout='{"status": "validated", "validated": true}',
+            stderr="",
+        )
+
+    app = build_local_demo_app(
+        base_dir=tmp_path,
+        trading_mode="paper",
+        execution_runner=fake_runner,
+        env={
+            "KRAKEN_API_KEY": "demo-key",
+            "KRAKEN_API_SECRET": "demo-secret",
+        },
+        execution_config=KrakenCLIConfig(
+            executable="kraken-cli",
+            dry_run=False,
+            live_enabled=True,
+            validate_only=True,
+            audit_log_path=tmp_path / "artifacts" / "orders_audit.jsonl",
+        ),
+        **_storage_overrides(tmp_path),
+    )
+    app._portfolio_provider.record_fill(
+        symbol_id="btc_usd",
+        side="buy",
+        quantity=0.01,
+        price=50_000.0,
+        filled_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC),
+        position_id="pos-5m",
+        source_signal_id="signal-123",
+        raw_event_id="evt-123",
+        event_type="ETF_APPROVAL",
+        exit_horizon_label="5m",
+        max_hold_minutes=5,
+        exit_due_at=datetime(2026, 4, 3, 12, 5, tzinfo=UTC),
+    )
+    app._latest_quotes = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=50_500.0,
+            open=50_100.0,
+            high=50_600.0,
+            low=49_900.0,
+            prev_close=50_050.0,
+            timestamp=1712100000,
+            asset_class="spot",
+        )
+    ]
+
+    result = app.execute_trade_cycle(classification_count=0)
+    signal_outcomes = [
+        artifact for artifact in result.artifacts if artifact.kind.value == "signal_outcome"
+    ]
+
+    assert len(result.trade_intents) == 1
+    assert len(result.execution_results) == 1
+    assert len(signal_outcomes) == 1
+    assert signal_outcomes[0].payload["exit_horizon_label"] == "5m"
+    assert signal_outcomes[0].refs["raw_event_id"] == "evt-123"
+    assert signal_outcomes[0].refs["signal_id"] == "signal-123"
+    assert result.portfolio.open_position_count() == 0
+    assert any("sell" in command for command in calls)
+
+
 def test_run_cycle_writes_incremental_action_log_and_summary_state(tmp_path: Path) -> None:
     def fake_parse_feed(_url: str) -> dict[str, object]:
         return {
@@ -345,6 +416,10 @@ def test_run_cycle_writes_incremental_action_log_and_summary_state(tmp_path: Pat
     assert "recent_events" not in summary["audit_summary"]
     assert "rationale" not in summary["trade_intents"][0]
     assert "request" not in summary["execution_results"][0]
+    assert "benchmark_summary" in summary["pnl_snapshot"]
+    assert summary["pnl_snapshot"]["position_pnl"]["btc_usd"]["benchmark_comparisons"]["momentum"][
+        "label"
+    ] == "Momentum baseline"
 
 
 def test_local_demo_app_restores_portfolio_from_trade_journal(tmp_path: Path) -> None:

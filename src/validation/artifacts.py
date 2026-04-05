@@ -20,6 +20,7 @@ class ArtifactKind(StrEnum):
     TRADE_INTENT = "trade_intent"
     PRE_TRADE_RISK_CHECK = "pre_trade_risk_check"
     EXECUTION_RESULT = "execution_result"
+    SIGNAL_OUTCOME = "signal_outcome"
     PERFORMANCE_CHECKPOINT = "performance_checkpoint"
 
 
@@ -75,7 +76,10 @@ class ValidationArtifact:
         agent_id: str | None = None,
     ) -> ValidationArtifact:
         """Create a trade-intent artifact from a strategy-produced intent."""
-        subject_id = f"{intent.symbol_id}:{intent.side}:{intent.generated_at.isoformat()}"
+        subject_id = (
+            f"{intent.signal_id or 'signal'}:{intent.symbol_id}:{intent.side}:"
+            f"{intent.exit_horizon_label or 'core'}:{intent.generated_at.isoformat()}"
+        )
         payload = {
             "symbol_id": intent.symbol_id,
             "side": intent.side,
@@ -85,6 +89,13 @@ class ValidationArtifact:
             "score": intent.score,
             "rationale": list(intent.rationale),
             "generated_at": intent.generated_at.isoformat(),
+            "signal_id": intent.signal_id,
+            "raw_event_id": intent.raw_event_id,
+            "event_type": intent.event_type,
+            "exit_horizon_label": intent.exit_horizon_label,
+            "max_hold_minutes": intent.max_hold_minutes,
+            "exit_due_at": intent.exit_due_at.isoformat() if intent.exit_due_at else None,
+            "position_id": intent.position_id,
         }
         evidence = (
             ArtifactEvidence(name="score", value=intent.score, unit="normalized"),
@@ -106,7 +117,18 @@ class ValidationArtifact:
             payload=payload,
             agent_id=agent_id,
             evidence=evidence,
-            refs={"symbol_id": intent.symbol_id},
+            refs={
+                "symbol_id": intent.symbol_id,
+                **({"signal_id": intent.signal_id} if intent.signal_id else {}),
+                **({"raw_event_id": intent.raw_event_id} if intent.raw_event_id else {}),
+                **({"event_type": intent.event_type} if intent.event_type else {}),
+                **(
+                    {"exit_horizon_label": intent.exit_horizon_label}
+                    if intent.exit_horizon_label
+                    else {}
+                ),
+                **({"position_id": intent.position_id} if intent.position_id else {}),
+            },
             created_at=intent.generated_at,
         )
 
@@ -198,8 +220,134 @@ class ValidationArtifact:
                 "intent_id": result.request.intent_id,
                 "client_order_id": result.request.client_order_id,
                 "symbol_id": result.request.symbol_id,
+                **({"signal_id": result.request.signal_id} if result.request.signal_id else {}),
+                **(
+                    {"raw_event_id": result.request.raw_event_id}
+                    if result.request.raw_event_id
+                    else {}
+                ),
+                **(
+                    {"event_type": result.request.event_type}
+                    if result.request.event_type
+                    else {}
+                ),
+                **(
+                    {"exit_horizon_label": result.request.exit_horizon_label}
+                    if result.request.exit_horizon_label
+                    else {}
+                ),
+                **({"position_id": result.request.position_id} if result.request.position_id else {}),
             },
             created_at=result.completed_at,
+        )
+
+    @classmethod
+    def from_signal_outcome(
+        cls,
+        execution_result: ExecutionResult,
+        *,
+        symbol_id: str | None = None,
+        side: str | None = None,
+        entry_price: float,
+        opened_at: datetime,
+        exit_horizon_label: str | None = None,
+        raw_event_id: str | None = None,
+        signal_id: str | None = None,
+        event_type: str | None = None,
+        realized_pnl_usd: float = 0.0,
+        agent_id: str | None = None,
+    ) -> ValidationArtifact:
+        """Create a realized signal-outcome artifact for horizon-by-horizon evaluation."""
+        fill = execution_result.fill
+        if fill is None:
+            raise ValueError("A fill is required to build a signal outcome artifact.")
+
+        resolved_symbol = symbol_id or execution_result.request.symbol_id
+        resolved_side = side or ("long" if execution_result.request.side == "buy" else "short")
+        resolved_horizon = exit_horizon_label or execution_result.request.exit_horizon_label
+        resolved_signal_id = signal_id or execution_result.request.signal_id
+        resolved_raw_event_id = raw_event_id or execution_result.request.raw_event_id
+        resolved_event_type = event_type or execution_result.request.event_type
+        realized_return_fraction = 0.0
+        if entry_price > 0:
+            realized_return_fraction = (
+                (fill.average_price - entry_price) / entry_price
+                if resolved_side == "long"
+                else (entry_price - fill.average_price) / entry_price
+            )
+        elapsed_minutes = max((fill.filled_at - opened_at).total_seconds() / 60.0, 0.0)
+        payload = {
+            "symbol_id": resolved_symbol,
+            "side": resolved_side,
+            "entry_price": round(entry_price, 8),
+            "exit_price": round(fill.average_price, 8),
+            "opened_at": opened_at.isoformat(),
+            "closed_at": fill.filled_at.isoformat(),
+            "elapsed_minutes": round(elapsed_minutes, 2),
+            "realized_pnl_usd": round(realized_pnl_usd, 2),
+            "realized_return_fraction": round(realized_return_fraction, 6),
+            "exit_horizon_label": resolved_horizon,
+            "signal_id": resolved_signal_id,
+            "raw_event_id": resolved_raw_event_id,
+            "event_type": resolved_event_type,
+            "intent_id": execution_result.request.intent_id,
+            "position_id": execution_result.request.position_id,
+        }
+        evidence = (
+            ArtifactEvidence(
+                name="realized_pnl_usd",
+                value=round(realized_pnl_usd, 2),
+                unit="usd",
+                passed=realized_pnl_usd >= 0,
+            ),
+            ArtifactEvidence(
+                name="realized_return_fraction",
+                value=round(realized_return_fraction, 6),
+                unit="fraction",
+                passed=realized_return_fraction >= 0,
+            ),
+            ArtifactEvidence(
+                name="elapsed_minutes",
+                value=round(elapsed_minutes, 2),
+                unit="minutes",
+            ),
+        )
+        subject_id = (
+            f"{resolved_signal_id or execution_result.request.intent_id}:"
+            f"{resolved_horizon or 'outcome'}:{fill.filled_at.isoformat()}"
+        )
+        artifact_id = _stable_id(
+            "signal-outcome",
+            agent_id or "unknown",
+            subject_id,
+            str(payload["realized_pnl_usd"]),
+        )
+        return cls(
+            artifact_id=artifact_id,
+            kind=ArtifactKind.SIGNAL_OUTCOME,
+            status=(
+                ArtifactStatus.PASSED
+                if payload["realized_return_fraction"] >= 0
+                else ArtifactStatus.FAILED
+            ),
+            subject_id=subject_id,
+            payload=payload,
+            agent_id=agent_id,
+            evidence=evidence,
+            refs={
+                "symbol_id": resolved_symbol,
+                "intent_id": execution_result.request.intent_id,
+                **({"signal_id": resolved_signal_id} if resolved_signal_id else {}),
+                **({"raw_event_id": resolved_raw_event_id} if resolved_raw_event_id else {}),
+                **({"event_type": resolved_event_type} if resolved_event_type else {}),
+                **({"exit_horizon_label": resolved_horizon} if resolved_horizon else {}),
+                **(
+                    {"position_id": execution_result.request.position_id}
+                    if execution_result.request.position_id
+                    else {}
+                ),
+            },
+            created_at=fill.filled_at,
         )
 
     @classmethod

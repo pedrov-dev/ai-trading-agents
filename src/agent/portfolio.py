@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
 
 PositionSide = Literal["long", "short"]
@@ -18,6 +18,13 @@ class Position:
     quantity: float
     entry_price: float
     opened_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    position_id: str | None = None
+    source_signal_id: str | None = None
+    raw_event_id: str | None = None
+    event_type: str | None = None
+    exit_horizon_label: str | None = None
+    max_hold_minutes: int | None = None
+    exit_due_at: datetime | None = None
 
     @property
     def notional_usd(self) -> float:
@@ -42,7 +49,20 @@ class PortfolioSnapshot:
     def has_open_position(self, symbol_id: str) -> bool:
         return any(position.symbol_id == symbol_id for position in self.positions)
 
-    def position_for_symbol(self, symbol_id: str) -> Position | None:
+    def positions_for_symbol(self, symbol_id: str) -> tuple[Position, ...]:
+        return tuple(position for position in self.positions if position.symbol_id == symbol_id)
+
+    def position_for_id(self, position_id: str) -> Position | None:
+        for position in self.positions:
+            if position.position_id == position_id:
+                return position
+        return None
+
+    def position_for_symbol(self, symbol_id: str, *, position_id: str | None = None) -> Position | None:
+        if position_id is not None:
+            position = self.position_for_id(position_id)
+            if position is not None:
+                return position
         for position in self.positions:
             if position.symbol_id == symbol_id:
                 return position
@@ -87,6 +107,13 @@ class LocalPortfolioStateProvider:
         quantity: float,
         price: float,
         filled_at: datetime | None = None,
+        position_id: str | None = None,
+        source_signal_id: str | None = None,
+        raw_event_id: str | None = None,
+        event_type: str | None = None,
+        exit_horizon_label: str | None = None,
+        max_hold_minutes: int | None = None,
+        exit_due_at: datetime | None = None,
     ) -> PortfolioSnapshot:
         if quantity <= 0 or price <= 0:
             return self._snapshot
@@ -99,22 +126,36 @@ class LocalPortfolioStateProvider:
             else self._snapshot.cash_usd + notional
         )
 
-        existing = self._snapshot.position_for_symbol(symbol_id)
-        remaining_positions = tuple(
-            position
-            for position in self._snapshot.positions
-            if position.symbol_id != symbol_id
+        existing = (
+            self._snapshot.position_for_id(position_id)
+            if position_id is not None
+            else self._snapshot.position_for_symbol(symbol_id)
         )
+        if existing is not None:
+            remaining_positions = tuple(
+                position
+                for position in self._snapshot.positions
+                if position is not existing
+            )
+        else:
+            remaining_positions = self._snapshot.positions
         realized_change = 0.0
         updated_position: Position | None = None
 
         if existing is None:
-            updated_position = Position(
+            updated_position = _build_position(
                 symbol_id=symbol_id,
                 side="long" if side == "buy" else "short",
                 quantity=round(quantity, 8),
                 entry_price=round(price, 8),
                 opened_at=observed_at,
+                position_id=position_id,
+                source_signal_id=source_signal_id,
+                raw_event_id=raw_event_id,
+                event_type=event_type,
+                exit_horizon_label=exit_horizon_label,
+                max_hold_minutes=max_hold_minutes,
+                exit_due_at=exit_due_at,
             )
         else:
             existing_signed_quantity = _signed_quantity(existing)
@@ -126,12 +167,19 @@ class LocalPortfolioStateProvider:
                     (abs(existing_signed_quantity) * existing.entry_price)
                     + (abs(fill_signed_quantity) * price)
                 ) / abs(new_signed_quantity)
-                updated_position = Position(
+                updated_position = _build_position(
                     symbol_id=symbol_id,
                     side=existing.side,
                     quantity=round(abs(new_signed_quantity), 8),
                     entry_price=round(weighted_entry, 8),
                     opened_at=existing.opened_at,
+                    position_id=existing.position_id,
+                    source_signal_id=existing.source_signal_id,
+                    raw_event_id=existing.raw_event_id,
+                    event_type=existing.event_type,
+                    exit_horizon_label=existing.exit_horizon_label,
+                    max_hold_minutes=existing.max_hold_minutes,
+                    exit_due_at=existing.exit_due_at,
                 )
             else:
                 closed_quantity = min(
@@ -149,20 +197,34 @@ class LocalPortfolioStateProvider:
 
                 if abs(new_signed_quantity) > 0:
                     if existing_signed_quantity * new_signed_quantity > 0:
-                        updated_position = Position(
+                        updated_position = _build_position(
                             symbol_id=symbol_id,
                             side=existing.side,
                             quantity=round(abs(new_signed_quantity), 8),
                             entry_price=round(existing.entry_price, 8),
                             opened_at=existing.opened_at,
+                            position_id=existing.position_id,
+                            source_signal_id=existing.source_signal_id,
+                            raw_event_id=existing.raw_event_id,
+                            event_type=existing.event_type,
+                            exit_horizon_label=existing.exit_horizon_label,
+                            max_hold_minutes=existing.max_hold_minutes,
+                            exit_due_at=existing.exit_due_at,
                         )
                     else:
-                        updated_position = Position(
+                        updated_position = _build_position(
                             symbol_id=symbol_id,
                             side="long" if new_signed_quantity > 0 else "short",
                             quantity=round(abs(new_signed_quantity), 8),
                             entry_price=round(price, 8),
                             opened_at=observed_at,
+                            position_id=position_id,
+                            source_signal_id=source_signal_id,
+                            raw_event_id=raw_event_id,
+                            event_type=event_type,
+                            exit_horizon_label=exit_horizon_label,
+                            max_hold_minutes=max_hold_minutes,
+                            exit_due_at=exit_due_at,
                         )
 
         updated_positions = remaining_positions + ((updated_position,) if updated_position else ())
@@ -211,6 +273,44 @@ class LocalPortfolioStateProvider:
 
 def _signed_quantity(position: Position) -> float:
     return position.quantity if position.side == "long" else -position.quantity
+
+
+def _build_position(
+    *,
+    symbol_id: str,
+    side: PositionSide,
+    quantity: float,
+    entry_price: float,
+    opened_at: datetime,
+    position_id: str | None = None,
+    source_signal_id: str | None = None,
+    raw_event_id: str | None = None,
+    event_type: str | None = None,
+    exit_horizon_label: str | None = None,
+    max_hold_minutes: int | None = None,
+    exit_due_at: datetime | None = None,
+) -> Position:
+    resolved_exit_due_at = exit_due_at
+    if resolved_exit_due_at is None and max_hold_minutes is not None and max_hold_minutes > 0:
+        resolved_exit_due_at = opened_at + timedelta(minutes=max_hold_minutes)
+
+    return Position(
+        symbol_id=symbol_id,
+        side=side,
+        quantity=quantity,
+        entry_price=entry_price,
+        opened_at=opened_at,
+        position_id=(
+            position_id
+            or f"{symbol_id}:{exit_horizon_label or 'core'}:{opened_at.isoformat()}"
+        ),
+        source_signal_id=source_signal_id,
+        raw_event_id=raw_event_id,
+        event_type=event_type,
+        exit_horizon_label=exit_horizon_label,
+        max_hold_minutes=max_hold_minutes,
+        exit_due_at=resolved_exit_due_at,
+    )
 
 
 def _calculate_realized_pnl(

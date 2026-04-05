@@ -84,6 +84,33 @@ def test_trade_intent_artifact_is_serializable_and_stable() -> None:
     assert payload["payload"]["rationale"] == ["ETF approval momentum", "Risk checks cleared"]
 
 
+def test_signal_outcome_artifact_preserves_event_signal_and_horizon_lineage() -> None:
+    execution_result = _make_execution_result()
+    closed_position = PortfolioSnapshot(
+        total_equity=10_000.0,
+        cash_usd=9_750.0,
+    )
+    del closed_position
+    outcome_artifact = ValidationArtifact.from_signal_outcome(
+        execution_result,
+        symbol_id="btc_usd",
+        side="long",
+        entry_price=67_000.0,
+        opened_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC),
+        exit_horizon_label="30m",
+        raw_event_id="evt-123",
+        signal_id="signal-123",
+        event_type="ETF_APPROVAL",
+        realized_pnl_usd=3.68,
+    )
+
+    assert outcome_artifact.kind == ArtifactKind.SIGNAL_OUTCOME
+    assert outcome_artifact.payload["exit_horizon_label"] == "30m"
+    assert outcome_artifact.refs["signal_id"] == "signal-123"
+    assert outcome_artifact.refs["raw_event_id"] == "evt-123"
+    assert any(item.name == "realized_return_fraction" for item in outcome_artifact.evidence)
+
+
 def test_risk_execution_and_performance_artifacts_capture_objective_evidence() -> None:
     risk_result = RiskCheckResult(
         approved=False,

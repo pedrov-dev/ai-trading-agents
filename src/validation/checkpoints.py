@@ -17,6 +17,7 @@ class CheckpointType(StrEnum):
     TRADE_INTENT = "trade_intent"
     PRE_TRADE_RISK = "pre_trade_risk"
     EXECUTION_OUTCOME = "execution_outcome"
+    SIGNAL_OUTCOME = "signal_outcome"
     PERFORMANCE = "performance"
 
 
@@ -91,6 +92,16 @@ def build_checkpoint_from_artifact(artifact: ValidationArtifact) -> ValidationCh
         passed = metric_value in {"simulated", "submitted", "filled"}
         checkpoint_type = CheckpointType.EXECUTION_OUTCOME
         notes = (f"Execution result captured with status={metric_value}.",)
+    elif artifact.kind == ArtifactKind.SIGNAL_OUTCOME:
+        metric_name = "realized_return_fraction"
+        metric_value = float(artifact.payload.get("realized_return_fraction", 0.0))
+        threshold = 0.0
+        passed = metric_value >= 0
+        checkpoint_type = CheckpointType.SIGNAL_OUTCOME
+        notes = (
+            "Signal horizon outcome recorded for "
+            f"{artifact.payload.get('exit_horizon_label', 'scheduled')}.",
+        )
     elif artifact.kind == ArtifactKind.PERFORMANCE_CHECKPOINT:
         metric_name = "realized_pnl_today"
         metric_value = float(artifact.payload.get("realized_pnl_today", 0.0))

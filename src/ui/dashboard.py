@@ -135,6 +135,9 @@ def build_position_rows(payload: Mapping[str, Any] | None) -> list[dict[str, Any
     for symbol_id, details in position_pnl.items():
         if not isinstance(details, Mapping):
             continue
+        benchmark_map = details.get("benchmark_comparisons")
+        comparisons = benchmark_map if isinstance(benchmark_map, Mapping) else {}
+        best_benchmark_id, best_benchmark = _best_benchmark(comparisons)
         rows.append(
             {
                 "symbol_id": str(details.get("symbol_id") or symbol_id),
@@ -148,6 +151,29 @@ def build_position_rows(payload: Mapping[str, Any] | None) -> list[dict[str, Any
                     _as_float(details.get("unrealized_return_fraction")) * 100,
                     2,
                 ),
+                "buy_hold_btc_pct": round(
+                    _benchmark_return_fraction(comparisons, "buy_and_hold_btc") * 100,
+                    2,
+                ),
+                "random_entry_pct": round(
+                    _benchmark_return_fraction(comparisons, "random_entry") * 100,
+                    2,
+                ),
+                "momentum_pct": round(
+                    _benchmark_return_fraction(comparisons, "momentum") * 100,
+                    2,
+                ),
+                "vol_breakout_pct": round(
+                    _benchmark_return_fraction(comparisons, "volatility_breakout") * 100,
+                    2,
+                ),
+                "best_benchmark": best_benchmark_id.replace("_", " ") if best_benchmark_id else "-",
+                "signal_edge_vs_best_pct": round(
+                    _as_float(details.get("unrealized_return_fraction"))
+                    - _as_float(best_benchmark.get("return_fraction") if best_benchmark else 0.0),
+                    4,
+                )
+                * 100,
             }
         )
 
@@ -231,7 +257,7 @@ def build_activity_rows(activity_records: Sequence[Mapping[str, Any]]) -> list[d
     for record in activity_records:
         affects = record.get("affects")
         affects_text = ""
-        if isinstance(affects, Sequence) and not isinstance(affects, (str, bytes)):
+        if isinstance(affects, Sequence) and not isinstance(affects, str | bytes):
             affects_text = ", ".join(str(item) for item in affects)
         rows.append(
             {
@@ -621,6 +647,28 @@ def _as_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _benchmark_return_fraction(comparisons: Mapping[str, Any], benchmark_id: str) -> float:
+    comparison = comparisons.get(benchmark_id)
+    if not isinstance(comparison, Mapping):
+        return 0.0
+    return _as_float(comparison.get("return_fraction"))
+
+
+def _best_benchmark(comparisons: Mapping[str, Any]) -> tuple[str, Mapping[str, Any] | None]:
+    best_id = ""
+    best_value = float("-inf")
+    best_comparison: Mapping[str, Any] | None = None
+    for benchmark_id, comparison in comparisons.items():
+        if not isinstance(comparison, Mapping):
+            continue
+        value = _as_float(comparison.get("return_fraction"))
+        if value > best_value:
+            best_id = str(benchmark_id)
+            best_value = value
+            best_comparison = comparison
+    return best_id, best_comparison
 
 
 def _format_pct(value: Any, *, scale: float = 1.0) -> str:
