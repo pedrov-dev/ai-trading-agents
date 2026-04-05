@@ -83,6 +83,42 @@ def test_local_trade_journal_appends_and_summarizes_position_lifecycle(tmp_path)
     assert summary.event_performance["etf_news"].sharpe == 0.0
 
 
+def test_trade_journal_entry_uses_two_layer_contract() -> None:
+    entry = TradeJournalEntry(
+        entry_id="journal-contract-1",
+        recorded_at=_DEF_TIME,
+        symbol_id="btc_usd",
+        side="buy",
+        event_type="entry",
+        quantity=0.01,
+        price=50_000.0,
+        signal_id="signal-123",
+        signal_family="news_sentiment",
+        signal_version="v2",
+        heuristic_version="v3",
+        model_version="gpt-5.3",
+        feature_set="news+price+volume",
+        asset="BTC",
+        direction="long",
+        confidence=0.72,
+        raw_event_id="evt-123",
+    )
+
+    payload = entry.to_dict()
+
+    assert payload["signal_id"] == "news_sentiment"
+    assert payload["signal_version"] == "v2"
+    assert payload["heuristic_version"] == "v3"
+    assert payload["asset"] == "BTC"
+    assert payload["direction"] == "long"
+    assert payload["confidence"] == 0.72
+    audit_metadata = payload["audit_metadata"]
+    assert audit_metadata["signal_instance_id"] == "signal-123"
+    assert audit_metadata["model_version"] == "gpt-5.3"
+    assert audit_metadata["feature_set"] == "news+price+volume"
+    assert audit_metadata["raw_event_id"] == "evt-123"
+
+
 def test_trade_journal_summarizes_event_type_performance_metrics() -> None:
     entries = (
         TradeJournalEntry(

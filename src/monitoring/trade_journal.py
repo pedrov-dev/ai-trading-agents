@@ -237,17 +237,26 @@ class TradeJournalEntry:
         position_entry_price = payload.get("position_entry_price")
         position_side = payload.get("position_side")
         position_id = payload.get("position_id")
+        audit_metadata = payload.get("audit_metadata")
+        audit_payload = (
+            cast(dict[str, Any], audit_metadata)
+            if isinstance(audit_metadata, dict)
+            else {}
+        )
         raw_signal_id = payload.get("signal_id")
-        signal_instance_id = payload.get("signal_instance_id")
-        signal_family = payload.get("signal_family")
+        signal_instance_id = audit_payload.get(
+            "signal_instance_id",
+            payload.get("signal_instance_id"),
+        )
+        signal_family = audit_payload.get("signal_family", payload.get("signal_family"))
         signal_version = payload.get("signal_version")
-        model_version = payload.get("model_version")
-        feature_set = payload.get("feature_set")
+        model_version = audit_payload.get("model_version", payload.get("model_version"))
+        feature_set = audit_payload.get("feature_set", payload.get("feature_set"))
         asset = payload.get("asset")
         direction = payload.get("direction")
         confidence = payload.get("confidence")
         signal_id = signal_instance_id if signal_instance_id is not None else raw_signal_id
-        raw_event_id = payload.get("raw_event_id")
+        raw_event_id = audit_payload.get("raw_event_id", payload.get("raw_event_id"))
         source_event_type = payload.get("source_event_type")
         source_event_group = payload.get("source_event_group")
         exit_horizon_label = payload.get("exit_horizon_label")
@@ -427,15 +436,22 @@ class TradeJournalEntry:
             "position_entry_price": self.position_entry_price,
             "position_id": self.position_id,
             "signal_id": self.signal_family or self.signal_id,
-            "signal_instance_id": self.signal_id,
-            "signal_family": self.signal_family,
             "signal_version": self.signal_version,
-            "model_version": self.model_version,
-            "feature_set": self.feature_set,
+            "heuristic_version": self.heuristic_version,
             "asset": self.asset,
             "direction": self.direction,
             "confidence": self.confidence,
-            "raw_event_id": self.raw_event_id,
+            "audit_metadata": {
+                key: value
+                for key, value in {
+                    "signal_instance_id": self.signal_id,
+                    "signal_family": self.signal_family,
+                    "model_version": self.model_version,
+                    "feature_set": self.feature_set,
+                    "raw_event_id": self.raw_event_id,
+                }.items()
+                if value is not None
+            },
             "source_event_type": self.source_event_type,
             "source_event_group": self.source_event_group,
             "exit_horizon_label": self.exit_horizon_label,
@@ -454,7 +470,6 @@ class TradeJournalEntry:
             "best_alternative_symbol": self.best_alternative_symbol,
             "best_alternative_return_fraction": self.best_alternative_return_fraction,
             "learning_reason_codes": list(self.learning_reason_codes),
-            "heuristic_version": self.heuristic_version,
             "notes": list(self.notes),
         }
 
@@ -681,16 +696,22 @@ def build_trade_journal_summary(
             "quantity": entry.position_quantity,
             "entry_price": entry.position_entry_price,
             "signal_id": entry.signal_family or entry.signal_id,
-            "signal_instance_id": entry.signal_id,
-            "signal_family": entry.signal_family,
             "signal_version": entry.signal_version,
             "heuristic_version": entry.heuristic_version,
-            "model_version": entry.model_version,
-            "feature_set": entry.feature_set,
             "asset": entry.asset,
             "direction": entry.direction,
             "confidence": entry.confidence,
-            "raw_event_id": entry.raw_event_id,
+            "audit_metadata": {
+                key: value
+                for key, value in {
+                    "signal_instance_id": entry.signal_id,
+                    "signal_family": entry.signal_family,
+                    "model_version": entry.model_version,
+                    "feature_set": entry.feature_set,
+                    "raw_event_id": entry.raw_event_id,
+                }.items()
+                if value is not None
+            },
             "source_event_type": entry.source_event_type,
             "source_event_group": entry.source_event_group,
             "exit_horizon_label": entry.exit_horizon_label,
