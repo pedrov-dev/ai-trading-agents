@@ -297,6 +297,33 @@ def build_signal_discovery_rows(payload: Mapping[str, Any] | None) -> list[dict[
     return sorted(rows, key=lambda row: row["sample_count"], reverse=True)
 
 
+def build_no_trade_rows(payload: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Flatten recent no-trade decisions for dashboard review."""
+    if payload is None:
+        return []
+    no_trade_decisions = payload.get("no_trade_decisions")
+    if not isinstance(no_trade_decisions, Sequence):
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for item in no_trade_decisions:
+        if not isinstance(item, Mapping):
+            continue
+        rows.append(
+            {
+                "symbol_id": str(item.get("symbol_id") or "-"),
+                "event_type": str(item.get("event_type") or "-"),
+                "reason_code": str(item.get("reason_code") or "-"),
+                "confidence_score": _as_float(item.get("confidence_score")),
+                "threshold": _as_float(item.get("threshold")),
+                "score": _as_float(item.get("score")),
+                "detected_at": str(item.get("detected_at") or ""),
+                "reason": str(item.get("reason") or ""),
+            }
+        )
+    return sorted(rows, key=lambda row: row["detected_at"], reverse=True)
+
+
 def build_calibration_rows(payload: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     """Flatten calibration buckets into dashboard rows."""
     if payload is None:
@@ -498,6 +525,7 @@ def render_dashboard() -> None:
     trade_intent_rows = build_trade_intent_rows(latest_payload)
     execution_rows = build_execution_rows(latest_payload)
     signal_discovery_rows = build_signal_discovery_rows(latest_payload)
+    no_trade_rows = build_no_trade_rows(latest_payload)
     calibration_rows = build_calibration_rows(latest_payload)
 
     _render_kpis(streamlit, latest_payload)
@@ -530,6 +558,12 @@ def render_dashboard() -> None:
             streamlit.dataframe(trade_intent_rows, width='stretch')
         else:
             streamlit.write("No trade intents available yet.")
+
+        streamlit.subheader("Recent no-trade decisions")
+        if no_trade_rows:
+            streamlit.dataframe(no_trade_rows, width='stretch')
+        else:
+            streamlit.write("No no-trade decisions recorded yet.")
 
         streamlit.subheader("Signal discovery by horizon")
         if signal_discovery_rows:

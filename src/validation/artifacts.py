@@ -10,7 +10,7 @@ from typing import Any
 
 from agent.portfolio import PortfolioSnapshot
 from agent.risk import RiskCheckResult
-from agent.signals import TradeIntent
+from agent.signals import NoTradeDecision, TradeIntent
 from execution.orders import ExecutionResult
 
 
@@ -18,6 +18,7 @@ class ArtifactKind(StrEnum):
     """Supported artifact categories for the hackathon MVP."""
 
     TRADE_INTENT = "trade_intent"
+    NO_TRADE_DECISION = "no_trade_decision"
     PRE_TRADE_RISK_CHECK = "pre_trade_risk_check"
     EXECUTION_RESULT = "execution_result"
     SIGNAL_OUTCOME = "signal_outcome"
@@ -137,6 +138,71 @@ class ValidationArtifact:
                 **({"position_id": intent.position_id} if intent.position_id else {}),
             },
             created_at=intent.generated_at,
+        )
+
+    @classmethod
+    def from_no_trade_decision(
+        cls,
+        decision: NoTradeDecision,
+        *,
+        agent_id: str | None = None,
+    ) -> ValidationArtifact:
+        """Create an explicit abstention artifact when the strategy defaults to no trade."""
+        subject_id = (
+            f"{decision.signal_id or 'no-trade'}:{decision.symbol_id}:"
+            f"{decision.reason_code}:{decision.detected_at.isoformat()}"
+        )
+        payload = {
+            "symbol_id": decision.symbol_id,
+            "event_type": decision.event_type,
+            "event_group": decision.event_group,
+            "raw_event_id": decision.raw_event_id,
+            "signal_id": decision.signal_id,
+            "reason_code": decision.reason_code,
+            "reason": decision.reason,
+            "confidence_score": decision.confidence_score,
+            "threshold": decision.threshold,
+            "score": decision.score,
+            "rationale": list(decision.rationale),
+            "detected_at": decision.detected_at.isoformat(),
+        }
+        evidence = (
+            ArtifactEvidence(name="decision", value="no_trade", passed=True),
+            ArtifactEvidence(
+                name="confidence_score",
+                value=decision.confidence_score,
+                unit="normalized",
+                passed=True,
+            ),
+            ArtifactEvidence(
+                name="threshold",
+                value=decision.threshold,
+                unit="normalized",
+                passed=True,
+            ),
+        )
+        artifact_id = _stable_id(
+            "no-trade-decision",
+            agent_id or "unknown",
+            subject_id,
+            decision.reason_code,
+            str(decision.confidence_score),
+        )
+        return cls(
+            artifact_id=artifact_id,
+            kind=ArtifactKind.NO_TRADE_DECISION,
+            status=ArtifactStatus.RECORDED,
+            subject_id=subject_id,
+            payload=payload,
+            agent_id=agent_id,
+            evidence=evidence,
+            refs={
+                "symbol_id": decision.symbol_id,
+                **({"signal_id": decision.signal_id} if decision.signal_id else {}),
+                **({"raw_event_id": decision.raw_event_id} if decision.raw_event_id else {}),
+                **({"event_type": decision.event_type} if decision.event_type else {}),
+            },
+            created_at=decision.detected_at,
         )
 
     @classmethod

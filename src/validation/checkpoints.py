@@ -15,6 +15,7 @@ class CheckpointType(StrEnum):
     """High-level checkpoint categories aligned with the trading lifecycle."""
 
     TRADE_INTENT = "trade_intent"
+    NO_TRADE_DECISION = "no_trade_decision"
     PRE_TRADE_RISK = "pre_trade_risk"
     EXECUTION_OUTCOME = "execution_outcome"
     SIGNAL_OUTCOME = "signal_outcome"
@@ -78,6 +79,13 @@ def build_checkpoint_from_artifact(artifact: ValidationArtifact) -> ValidationCh
         passed = metric_value > 0
         checkpoint_type = CheckpointType.TRADE_INTENT
         notes = ("Trade intent recorded for downstream execution.",)
+    elif artifact.kind == ArtifactKind.NO_TRADE_DECISION:
+        metric_name = "reason_code"
+        metric_value = str(artifact.payload.get("reason_code", "no_trade"))
+        threshold = artifact.payload.get("threshold")
+        passed = True
+        checkpoint_type = CheckpointType.NO_TRADE_DECISION
+        notes = (str(artifact.payload.get("reason", "Strategy defaulted to no trade.")),)
     elif artifact.kind == ArtifactKind.PRE_TRADE_RISK_CHECK:
         metric_name = "approved"
         metric_value = bool(artifact.payload.get("approved", False))

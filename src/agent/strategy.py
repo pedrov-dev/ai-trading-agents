@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from agent.portfolio import PortfolioSnapshot, Position
 from agent.risk import RiskCheckResult, RiskConfig, RiskManager
 from agent.signals import (
+    NoTradeDecision,
     Signal,
     TradeIntent,
     build_signal,
@@ -25,6 +26,7 @@ class StrategyConfig:
     """Thresholds and ranking weights for the event-driven strategy."""
 
     min_signal_score: float = 0.7
+    min_confidence_score: float = 0.7
     max_intents_per_cycle: int = 2
     max_ranked_signals_per_cycle: int | None = None
     confidence_weight: float = 0.35
@@ -116,6 +118,7 @@ class SimpleEventDrivenStrategy:
         self._risk_manager = RiskManager(self._risk_config)
         self._exit_config = exit_config or ExitConfig()
         self._thesis_cooldowns: dict[tuple[str, str], list[_ThesisCooldownState]] = {}
+        self._last_no_trade_decisions: list[NoTradeDecision] = []
 
     def generate_trade_intents(
         self,
@@ -125,6 +128,7 @@ class SimpleEventDrivenStrategy:
         portfolio: PortfolioSnapshot,
     ) -> list[TradeIntent]:
         ranked_signals: dict[str, RankedSignal] = {}
+        self._last_no_trade_decisions = []
 
         for event in detected_events:
             quote = select_quote_for_event(event=event, price_quotes=price_quotes)
@@ -138,7 +142,27 @@ class SimpleEventDrivenStrategy:
 
             recent_theses = self._recent_thesis_states(signal=base_signal)
             signal = self._apply_thesis_cooldown(signal=base_signal)
+            if signal.confidence < self._config.min_confidence_score:
+                self._record_no_trade_decision(
+                    signal=signal,
+                    reason_code="confidence_below_threshold",
+                    reason=(
+                        f"Confidence {signal.confidence:.2f} is below threshold "
+                        f"{self._config.min_confidence_score:.2f}."
+                    ),
+                    threshold=self._config.min_confidence_score,
+                )
+                continue
             if signal.score < self._config.min_signal_score:
+                self._record_no_trade_decision(
+                    signal=signal,
+                    reason_code="score_below_threshold",
+                    reason=(
+                        f"Score {signal.score:.2f} stayed below the minimum signal "
+                        f"threshold {self._config.min_signal_score:.2f}."
+                    ),
+                    threshold=self._config.min_signal_score,
+                )
                 continue
 
             proposed_notional = self._risk_manager.size_for_signal(
@@ -151,6 +175,21 @@ class SimpleEventDrivenStrategy:
                 proposed_notional=proposed_notional,
             )
             if not risk_result.approved:
+                violation_summary = ", ".join(
+                    violation.code for violation in risk_result.violations
+                ) or "risk_policy"
+                note_summary = (
+                    " ".join(risk_result.notes)
+                    or "Risk checks did not approve a new entry."
+                )
+                self._record_no_trade_decision(
+                    signal=signal,
+                    reason_code="risk_check_blocked",
+                    reason=(
+                        f"Risk gate blocked a new {signal.side} on {signal.symbol_id} "
+                        f"({violation_summary}). {note_summary}"
+                    ),
+                )
                 continue
 
             ranked_signal = self._rank_signal(
@@ -188,6 +227,14 @@ class SimpleEventDrivenStrategy:
                 portfolio=portfolio,
                 selected_new_symbols=selected_new_symbols,
             ):
+                self._record_no_trade_decision(
+                    signal=signal,
+                    reason_code="max_concurrent_positions",
+                    reason=(
+                        "Opportunity skipped because the portfolio already reached the "
+                        "maximum number of concurrent symbols."
+                    ),
+                )
                 continue
 
             available_intent_slots = self._available_intent_slots_for_symbol(
@@ -196,6 +243,14 @@ class SimpleEventDrivenStrategy:
                 planned_intents_by_symbol=planned_intents_by_symbol,
             )
             if available_intent_slots == 0:
+                self._record_no_trade_decision(
+                    signal=signal,
+                    reason_code="max_positions_per_asset",
+                    reason=(
+                        f"Opportunity skipped because {signal.symbol_id} already used "
+                        "all available per-asset position slots."
+                    ),
+                )
                 continue
 
             rationale_suffix = ranked_signal.risk_result.notes + (
@@ -234,6 +289,37 @@ class SimpleEventDrivenStrategy:
                 break
 
         return intents
+
+    def consume_no_trade_decisions(self) -> tuple[NoTradeDecision, ...]:
+        """Return and clear the latest explicit strategy abstentions."""
+        decisions = tuple(self._last_no_trade_decisions)
+        self._last_no_trade_decisions = []
+        return decisions
+
+    def _record_no_trade_decision(
+        self,
+        *,
+        signal: Signal,
+        reason_code: str,
+        reason: str,
+        threshold: float | None = None,
+    ) -> None:
+        self._last_no_trade_decisions.append(
+            NoTradeDecision(
+                symbol_id=signal.symbol_id,
+                reason_code=reason_code,
+                reason=reason,
+                confidence_score=signal.confidence,
+                threshold=threshold,
+                score=signal.score,
+                event_type=signal.event_type,
+                raw_event_id=signal.raw_event_id,
+                signal_id=signal.signal_id,
+                event_group=signal.event_group,
+                detected_at=signal.generated_at,
+                rationale=signal.rationale + (reason,),
+            )
+        )
 
     def _max_ranked_signals_per_cycle(self) -> int:
         configured_limit = self._config.max_ranked_signals_per_cycle

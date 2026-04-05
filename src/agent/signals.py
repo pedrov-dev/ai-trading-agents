@@ -166,6 +166,37 @@ class TradeIntent:
         object.__setattr__(self, "expected_move", resolved_expected_move)
 
 
+@dataclass(frozen=True)
+class NoTradeDecision:
+    """Explicit strategy abstention recorded when a setup should be skipped."""
+
+    symbol_id: str
+    reason_code: str
+    reason: str
+    confidence_score: float
+    threshold: float | None
+    score: float
+    event_type: str | None = None
+    raw_event_id: str | None = None
+    signal_id: str | None = None
+    event_group: str | None = None
+    detected_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    rationale: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.confidence_score <= 1.0:
+            raise ValueError("No-trade confidence_score must be between 0.0 and 1.0.")
+        if not 0.0 <= self.score <= 1.0:
+            raise ValueError("No-trade score must be between 0.0 and 1.0.")
+        if self.threshold is not None and not 0.0 <= self.threshold <= 1.0:
+            raise ValueError("No-trade threshold must be between 0.0 and 1.0 when set.")
+
+        object.__setattr__(self, "confidence_score", round(self.confidence_score, 4))
+        object.__setattr__(self, "score", round(self.score, 4))
+        if self.threshold is not None:
+            object.__setattr__(self, "threshold", round(self.threshold, 4))
+
+
 def infer_trade_side(event_type: str) -> TradeSide | None:
     bias = _EVENT_BIAS.get(event_type, 0.0)
     if bias > 0:

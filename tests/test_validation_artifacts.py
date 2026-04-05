@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 from agent.portfolio import PortfolioSnapshot
 from agent.risk import RiskCheckResult, RiskViolation
-from agent.signals import TradeIntent
+from agent.signals import NoTradeDecision, TradeIntent
 from execution.orders import (
     ExecutionMode,
     ExecutionResult,
@@ -111,6 +111,30 @@ def test_signal_outcome_artifact_preserves_event_signal_and_horizon_lineage() ->
     assert outcome_artifact.refs["signal_id"] == "signal-123"
     assert outcome_artifact.refs["raw_event_id"] == "evt-123"
     assert any(item.name == "realized_return_fraction" for item in outcome_artifact.evidence)
+
+
+def test_no_trade_artifact_captures_default_skip_reason() -> None:
+    decision = NoTradeDecision(
+        symbol_id="btc_usd",
+        reason_code="confidence_below_threshold",
+        reason="Confidence 0.62 is below the default threshold 0.70.",
+        confidence_score=0.62,
+        threshold=0.7,
+        score=0.7374,
+        event_type="ETF_APPROVAL",
+        raw_event_id="evt-no-trade",
+        detected_at=_DEF_TIME,
+        rationale=("Defaulted to no trade because conviction stayed below threshold.",),
+    )
+
+    artifact = ValidationArtifact.from_no_trade_decision(decision, agent_id="agent-123")
+
+    assert artifact.kind == ArtifactKind.NO_TRADE_DECISION
+    assert artifact.status == ArtifactStatus.RECORDED
+    assert artifact.payload["reason_code"] == "confidence_below_threshold"
+    assert artifact.payload["threshold"] == 0.7
+    assert artifact.payload["confidence_score"] == 0.62
+    assert any(item.name == "confidence_score" and item.value == 0.62 for item in artifact.evidence)
 
 
 def test_risk_execution_and_performance_artifacts_capture_objective_evidence() -> None:

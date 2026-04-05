@@ -16,7 +16,7 @@ from typing import Any, cast
 
 from agent.portfolio import LocalPortfolioStateProvider, PortfolioSnapshot
 from agent.risk import RiskConfig
-from agent.signals import TradeIntent
+from agent.signals import NoTradeDecision, TradeIntent
 from agent.strategy import SimpleEventDrivenStrategy
 from detection.event_detection import DetectedEvent, RuleBasedEventDetector
 from detection.event_detection_postgres import (
@@ -121,6 +121,7 @@ class RuntimeCycleResult:
     classification_count: int
     detected_events: tuple[DetectedEvent, ...]
     trade_intents: tuple[TradeIntent, ...]
+    no_trade_decisions: tuple[NoTradeDecision, ...]
     execution_results: tuple[ExecutionResult, ...]
     artifacts: tuple[ValidationArtifact, ...]
     checkpoints: tuple[ValidationCheckpoint, ...]
@@ -190,6 +191,23 @@ class RuntimeCycleResult:
                 }
                 for intent in self.trade_intents
             ],
+            "no_trade_decisions": [
+                {
+                    "symbol_id": decision.symbol_id,
+                    "reason_code": decision.reason_code,
+                    "reason": decision.reason,
+                    "confidence_score": decision.confidence_score,
+                    "threshold": decision.threshold,
+                    "score": decision.score,
+                    "event_type": decision.event_type,
+                    "event_group": decision.event_group,
+                    "raw_event_id": decision.raw_event_id,
+                    "signal_id": decision.signal_id,
+                    "detected_at": decision.detected_at.isoformat(),
+                    "rationale": list(decision.rationale),
+                }
+                for decision in self.no_trade_decisions
+            ],
             "execution_results": [result.to_dict() for result in self.execution_results],
             "artifacts": [artifact.to_dict() for artifact in self.artifacts],
             "checkpoints": [checkpoint.to_dict() for checkpoint in self.checkpoints],
@@ -231,6 +249,7 @@ class RuntimeCycleResult:
             "counts": {
                 "detected_events": len(self.detected_events),
                 "trade_intents": len(self.trade_intents),
+                "no_trade_decisions": len(self.no_trade_decisions),
                 "executions": len(self.execution_results),
                 "artifacts": self.artifact_count,
                 "checkpoints": self.checkpoint_count,
@@ -265,6 +284,21 @@ class RuntimeCycleResult:
                     "position_id": intent.position_id,
                 }
                 for intent in self.trade_intents[-10:]
+            ],
+            "no_trade_decisions": [
+                {
+                    "symbol_id": decision.symbol_id,
+                    "reason_code": decision.reason_code,
+                    "reason": decision.reason,
+                    "confidence_score": decision.confidence_score,
+                    "threshold": decision.threshold,
+                    "score": decision.score,
+                    "event_type": decision.event_type,
+                    "raw_event_id": decision.raw_event_id,
+                    "signal_id": decision.signal_id,
+                    "detected_at": decision.detected_at.isoformat(),
+                }
+                for decision in self.no_trade_decisions[-10:]
             ],
             "execution_results": [
                 {
@@ -365,6 +399,7 @@ class LocalArtifactLedger:
                 "actions": 0,
                 "detected_events": 0,
                 "trade_intents": 0,
+                "no_trade_decisions": 0,
                 "executions": 0,
                 "artifacts": 0,
                 "checkpoints": 0,
@@ -394,6 +429,7 @@ class LocalArtifactLedger:
                 "actions": 0,
                 "detected_events": len(detected_events),
                 "trade_intents": 0,
+                "no_trade_decisions": 0,
                 "executions": 0,
                 "artifacts": 0,
                 "checkpoints": 0,
@@ -409,6 +445,7 @@ class LocalArtifactLedger:
                 for event in detected_events[-10:]
             ],
             "trade_intents": [],
+            "no_trade_decisions": [],
             "execution_results": [],
             "last_action": None,
         }
@@ -522,6 +559,7 @@ class LocalArtifactLedger:
             "cycle_completed": "cycle",
             "events_detected": "detection",
             "trade_intents_generated": "strategy",
+            "no_trade_decisions_recorded": "strategy",
             "execution_skipped": "execution",
             "execution_recorded": "execution",
             "portfolio_updated": "portfolio",
@@ -548,6 +586,11 @@ class LocalArtifactLedger:
         if action == "trade_intents_generated":
             intent_type = details.get("intent_type", "trade")
             return f"Generated {details.get('count', 0)} {intent_type} intents."
+        if action == "no_trade_decisions_recorded":
+            return (
+                "Defaulted to no trade for "
+                f"{details.get('count', 0)} setup(s) below the configured gate."
+            )
         if action == "execution_skipped":
             return "Execution was blocked by the runtime risk re-check."
         if action == "execution_recorded":
@@ -1268,6 +1311,42 @@ class TradingApplication:
                 },
                 count_updates={"trade_intents": len(entry_intents)},
             )
+        consume_no_trade_decisions = getattr(self._strategy, "consume_no_trade_decisions", None)
+        no_trade_decisions = (
+            tuple(cast(Any, consume_no_trade_decisions)())
+            if callable(consume_no_trade_decisions)
+            else ()
+        )
+        no_trade_artifacts = self._record_no_trade_decisions(decisions=no_trade_decisions)
+        if no_trade_decisions:
+            self._artifact_ledger.record_action(
+                action="no_trade_decisions_recorded",
+                status="recorded",
+                affects=("strategy", "validation_artifacts", "signal_gating"),
+                details={
+                    "count": len(no_trade_decisions),
+                    "reasons": sorted({decision.reason_code for decision in no_trade_decisions}),
+                    "symbols": sorted({decision.symbol_id for decision in no_trade_decisions}),
+                },
+                summary_updates={
+                    "no_trade_decisions": [
+                        {
+                            "symbol_id": decision.symbol_id,
+                            "reason_code": decision.reason_code,
+                            "reason": decision.reason,
+                            "confidence_score": decision.confidence_score,
+                            "threshold": decision.threshold,
+                            "score": decision.score,
+                            "event_type": decision.event_type,
+                            "raw_event_id": decision.raw_event_id,
+                            "signal_id": decision.signal_id,
+                            "detected_at": decision.detected_at.isoformat(),
+                        }
+                        for decision in no_trade_decisions[-10:]
+                    ]
+                },
+                count_updates={"no_trade_decisions": len(no_trade_decisions)},
+            )
         entry_results, entry_artifacts = self._execute_intents(
             trade_intents=entry_intents,
             current_portfolio=current_portfolio,
@@ -1275,7 +1354,7 @@ class TradingApplication:
 
         trade_intents = exit_intents + entry_intents
         execution_results = [*exit_results, *entry_results]
-        artifacts = [*exit_artifacts, *entry_artifacts]
+        artifacts = [*exit_artifacts, *no_trade_artifacts, *entry_artifacts]
 
         portfolio = self._portfolio_provider.get_portfolio_snapshot()
         performance_artifact = ValidationArtifact.from_performance_checkpoint(
@@ -1360,6 +1439,7 @@ class TradingApplication:
             classification_count=classification_count,
             detected_events=detected_events,
             trade_intents=trade_intents,
+            no_trade_decisions=no_trade_decisions,
             execution_results=tuple(execution_results),
             artifacts=tuple(artifacts),
             checkpoints=checkpoints,
@@ -1377,6 +1457,21 @@ class TradingApplication:
             summary=result.to_summary_dict(),
         )
         return result
+
+    def _record_no_trade_decisions(
+        self,
+        *,
+        decisions: tuple[NoTradeDecision, ...],
+    ) -> list[ValidationArtifact]:
+        artifacts: list[ValidationArtifact] = []
+        for decision in decisions:
+            artifact = ValidationArtifact.from_no_trade_decision(
+                decision,
+                agent_id=self._identity.agent_id,
+            )
+            self._artifact_ledger.record_artifact(artifact)
+            artifacts.append(artifact)
+        return artifacts
 
     def _execute_intents(
         self,
@@ -1541,8 +1636,33 @@ class TradingApplication:
 def _build_signal_discovery_summary(
     artifacts: tuple[ValidationArtifact, ...] | list[ValidationArtifact],
 ) -> dict[str, Any]:
-    summary: dict[str, Any] = {"total_outcomes": 0, "by_horizon": {}}
+    summary: dict[str, Any] = {
+        "total_outcomes": 0,
+        "by_horizon": {},
+        "no_trade_count": 0,
+        "no_trade_by_reason": {},
+        "recent_no_trade_decisions": [],
+    }
     for artifact in artifacts:
+        if artifact.kind == ArtifactKind.NO_TRADE_DECISION:
+            payload = artifact.payload
+            reason_code = str(payload.get("reason_code") or "unknown")
+            summary["no_trade_count"] = int(summary.get("no_trade_count", 0)) + 1
+            no_trade_by_reason = cast(dict[str, int], summary["no_trade_by_reason"])
+            no_trade_by_reason[reason_code] = int(no_trade_by_reason.get(reason_code, 0)) + 1
+            cast(list[dict[str, Any]], summary["recent_no_trade_decisions"]).append(
+                {
+                    "symbol_id": str(payload.get("symbol_id") or "-"),
+                    "event_type": str(payload.get("event_type") or "-"),
+                    "reason_code": reason_code,
+                    "confidence_score": float(payload.get("confidence_score") or 0.0),
+                    "threshold": payload.get("threshold"),
+                    "detected_at": str(
+                        payload.get("detected_at") or artifact.created_at.isoformat()
+                    ),
+                }
+            )
+            continue
         if artifact.kind != ArtifactKind.SIGNAL_OUTCOME:
             continue
         payload = artifact.payload

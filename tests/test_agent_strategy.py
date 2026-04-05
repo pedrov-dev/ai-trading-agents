@@ -129,6 +129,50 @@ def test_strategy_skips_low_score_or_risk_blocked_setups() -> None:
     assert intents == []
 
 
+def test_strategy_defaults_to_no_trade_when_confidence_is_below_threshold() -> None:
+    strategy = SimpleEventDrivenStrategy(
+        config=StrategyConfig(min_signal_score=0.7, min_confidence_score=0.7),
+        risk_config=RiskConfig(max_position_fraction=0.05),
+    )
+    portfolio = PortfolioSnapshot(total_equity=10_000.0, cash_usd=10_000.0)
+    events = [
+        DetectedEvent(
+            raw_event_id="evt-no-trade",
+            event_type="ETF_APPROVAL",
+            rule_name="etf_approval",
+            confidence=0.62,
+            matched_text="bitcoin etf approval confirmed",
+            detected_at=datetime(2026, 4, 3, 12, 15, tzinfo=UTC),
+        )
+    ]
+    prices = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=68_000.0,
+            open=66_000.0,
+            high=68_500.0,
+            low=65_500.0,
+            prev_close=65_800.0,
+            timestamp=1712100000,
+            asset_class="spot",
+        )
+    ]
+
+    intents = strategy.generate_trade_intents(
+        detected_events=events,
+        price_quotes=prices,
+        portfolio=portfolio,
+    )
+    no_trade_decisions = strategy.consume_no_trade_decisions()
+
+    assert intents == []
+    assert len(no_trade_decisions) == 1
+    assert no_trade_decisions[0].reason_code == "confidence_below_threshold"
+    assert no_trade_decisions[0].confidence_score == 0.62
+    assert no_trade_decisions[0].threshold == 0.7
+    assert "below threshold" in no_trade_decisions[0].reason.lower()
+
+
 def test_strategy_decays_repeated_same_thesis_within_cooldown() -> None:
     strategy = SimpleEventDrivenStrategy(
         config=StrategyConfig(
