@@ -62,7 +62,8 @@ class RiskManager:
         self._config = config or RiskConfig()
 
     def size_for_signal(self, *, signal: Signal, portfolio: PortfolioSnapshot) -> float:
-        normalized_score = min(max(signal.score, 0.0), 1.0)
+        sizing_score = signal.confirmation_score if signal.confirmation_score > 0 else signal.score
+        normalized_score = min(max(sizing_score, 0.0), 1.0)
         target_fraction = min(
             self._config.max_position_fraction,
             max(self._config.max_position_fraction * normalized_score, 0.01),

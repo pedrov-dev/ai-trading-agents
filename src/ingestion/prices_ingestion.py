@@ -33,6 +33,8 @@ class PriceQuote:
     atr: float | None = None
     realized_volatility: float | None = None
     volatility_filter: float | None = None
+    session_volume: float | None = None
+    volume_ratio: float | None = None
 
     @property
     def dedup_hash(self) -> str:
@@ -54,11 +56,12 @@ class HistoricalBar:
 
 @dataclass(frozen=True)
 class _VolatilityMetrics:
-    """Pre-computed ATR and realized volatility for a single symbol."""
+    """Pre-computed ATR, realized volatility, and volume baselines for a symbol."""
 
     atr: float | None = None
     realized_volatility: float | None = None
     volatility_filter: float | None = None
+    average_volume: float | None = None
 
 
 def _default_http_get(url: str, params: dict[str, str]) -> dict[str, Any]:
@@ -106,6 +109,7 @@ class PricesIngestionService:
             )
             ticker_data = self._extract_result_entry(payload, symbol)
             metrics = volatility_metrics.get(symbol.symbol_id, _VolatilityMetrics())
+            session_volume = self._first_float(ticker_data.get("v"))
             quotes.append(
                 PriceQuote(
                     symbol_id=symbol.symbol_id,
@@ -119,6 +123,12 @@ class PricesIngestionService:
                     atr=metrics.atr,
                     realized_volatility=metrics.realized_volatility,
                     volatility_filter=metrics.volatility_filter,
+                    session_volume=session_volume if session_volume > 0 else None,
+                    volume_ratio=self._resolve_volume_ratio(
+                        ticker_data=ticker_data,
+                        metrics=metrics,
+                        session_volume=session_volume,
+                    ),
                 )
             )
         return quotes
@@ -214,10 +224,18 @@ class PricesIngestionService:
                 4,
             )
 
+        volume_samples = [
+            bar.volume
+            for bar in ordered_bars[-self._realized_volatility_lookback_bars :]
+            if bar.volume > 0
+        ]
+        average_volume = round(fmean(volume_samples), 4) if volume_samples else None
+
         return _VolatilityMetrics(
             atr=atr,
             realized_volatility=realized_volatility,
             volatility_filter=volatility_filter,
+            average_volume=average_volume,
         )
 
     @staticmethod
@@ -231,6 +249,33 @@ class PricesIngestionService:
         if isinstance(value, (int, float, str)):
             return float(value)
         return 0.0
+
+    @staticmethod
+    def _last_float(value: Any) -> float:
+        if isinstance(value, list) and value:
+            return float(value[-1])
+        if isinstance(value, (int, float, str)):
+            return float(value)
+        return 0.0
+
+    def _resolve_volume_ratio(
+        self,
+        *,
+        ticker_data: dict[str, Any],
+        metrics: _VolatilityMetrics,
+        session_volume: float,
+    ) -> float | None:
+        if session_volume <= 0:
+            return None
+
+        reference_volume = metrics.average_volume
+        if reference_volume is None or reference_volume <= 0:
+            reference_volume = self._last_float(ticker_data.get("v"))
+
+        if reference_volume <= 0:
+            return None
+
+        return round(session_volume / max(reference_volume, 0.0001), 4)
 
     @staticmethod
     def _extract_result_entry(payload: dict[str, Any], symbol: PriceSymbol) -> dict[str, Any]:

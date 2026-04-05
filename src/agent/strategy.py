@@ -25,8 +25,12 @@ from ingestion.prices_ingestion import PriceQuote
 class StrategyConfig:
     """Thresholds and ranking weights for the event-driven strategy."""
 
-    min_signal_score: float = 0.7
+    min_signal_score: float = 0.5
     min_confidence_score: float = 0.7
+    entry_confirmation_threshold: float = 0.65
+    reduced_size_confirmation_threshold: float = 0.5
+    price_confirmation_move_threshold: float = 0.001
+    volume_spike_threshold: float = 1.5
     max_intents_per_cycle: int = 2
     max_ranked_signals_per_cycle: int | None = None
     confidence_weight: float = 0.35
@@ -160,7 +164,12 @@ class SimpleEventDrivenStrategy:
                 continue
 
             try:
-                base_signal = build_signal(event=event, quote=quote)
+                base_signal = build_signal(
+                    event=event,
+                    quote=quote,
+                    price_confirmation_threshold=self._config.price_confirmation_move_threshold,
+                    volume_spike_threshold=self._config.volume_spike_threshold,
+                )
             except ValueError:
                 continue
 
@@ -206,6 +215,32 @@ class SimpleEventDrivenStrategy:
                     threshold=self._config.min_confidence_score,
                 )
                 continue
+            if (
+                signal.confirmation_score < self._config.reduced_size_confirmation_threshold
+                and signal.score < self._config.min_signal_score
+            ):
+                self._record_no_trade_decision(
+                    signal=signal,
+                    reason_code="confirmation_below_threshold",
+                    reason=(
+                        "Setup needs at least "
+                        f"{self._config.reduced_size_confirmation_threshold:.2f} weighted "
+                        f"confirmation to trade, but only reached {signal.confirmation_score:.2f}."
+                    ),
+                    threshold=self._config.reduced_size_confirmation_threshold,
+                )
+                continue
+            if signal.confirmation_score < self._config.entry_confirmation_threshold:
+                signal = replace(
+                    signal,
+                    rationale=signal.rationale
+                    + (
+                        "Weighted confirmation "
+                        f"{signal.confirmation_score:.2f} is below the strong-entry "
+                        f"threshold {self._config.entry_confirmation_threshold:.2f}, "
+                        "so the setup stays in reduced-size mode.",
+                    ),
+                )
             if signal.score < self._config.min_signal_score:
                 self._record_no_trade_decision(
                     signal=signal,
@@ -459,7 +494,11 @@ class SimpleEventDrivenStrategy:
         recent_theses: tuple[_ThesisCooldownState, ...],
         risk_reward_estimate: RiskRewardEstimate,
     ) -> RankedSignal:
-        confidence_score = _clamp_score((signal.score * 0.7) + (signal.confidence * 0.3))
+        confidence_score = _clamp_score(
+            (signal.confirmation_score * 0.55)
+            + (signal.score * 0.3)
+            + (signal.confidence * 0.15)
+        )
         best_similarity, best_state = self._best_thesis_match(
             signal=signal,
             recent_theses=recent_theses,

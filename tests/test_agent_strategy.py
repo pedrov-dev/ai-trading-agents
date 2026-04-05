@@ -526,6 +526,133 @@ def test_strategy_skips_trade_when_volatility_is_not_meaningful() -> None:
     assert "volatility filter" in no_trade_decisions[0].reason.lower()
 
 
+def test_strategy_skips_news_only_setup_below_confirmation_threshold() -> None:
+    strategy = SimpleEventDrivenStrategy(
+        config=StrategyConfig(
+            min_signal_score=0.5,
+            min_confidence_score=0.7,
+            entry_confirmation_threshold=0.65,
+            reduced_size_confirmation_threshold=0.5,
+        ),
+        risk_config=RiskConfig(max_position_fraction=0.05),
+    )
+    portfolio = PortfolioSnapshot(total_equity=10_000.0, cash_usd=10_000.0)
+    events = [
+        DetectedEvent(
+            raw_event_id="evt-news-only",
+            event_type="ETF_APPROVAL",
+            rule_name="etf_approval",
+            confidence=0.92,
+            matched_text="bitcoin etf approval headline crosses",
+            detected_at=datetime(2026, 4, 4, 12, 15, tzinfo=UTC),
+        )
+    ]
+    prices = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=68_000.0,
+            open=67_980.0,
+            high=68_050.0,
+            low=67_900.0,
+            prev_close=67_960.0,
+            timestamp=1712189700,
+            asset_class="spot",
+        )
+    ]
+
+    intents = strategy.generate_trade_intents(
+        detected_events=events,
+        price_quotes=prices,
+        portfolio=portfolio,
+    )
+    no_trade_decisions = strategy.consume_no_trade_decisions()
+
+    assert intents == []
+    assert len(no_trade_decisions) == 1
+    assert no_trade_decisions[0].reason_code == "confirmation_below_threshold"
+    assert "needs at least" in no_trade_decisions[0].reason.lower()
+
+
+def test_strategy_scales_position_size_by_confirmation_strength() -> None:
+    strategy = SimpleEventDrivenStrategy(
+        config=StrategyConfig(
+            min_signal_score=0.5,
+            min_confidence_score=0.7,
+            entry_confirmation_threshold=0.65,
+            reduced_size_confirmation_threshold=0.5,
+        ),
+        risk_config=RiskConfig(max_position_fraction=0.05),
+    )
+    portfolio = PortfolioSnapshot(total_equity=10_000.0, cash_usd=10_000.0)
+    events = [
+        DetectedEvent(
+            raw_event_id="evt-strong",
+            event_type="SECURITY_INCIDENT",
+            rule_name="security_incident",
+            confidence=0.94,
+            matched_text="bitcoin drops after exchange security incident",
+            detected_at=datetime(2026, 4, 4, 13, 0, tzinfo=UTC),
+        ),
+        DetectedEvent(
+            raw_event_id="evt-medium",
+            event_type="TECHNICAL_BREAKOUT",
+            rule_name="technical_breakout",
+            confidence=0.88,
+            matched_text="solana breakout extends but turnover stays mixed",
+            detected_at=datetime(2026, 4, 4, 13, 5, tzinfo=UTC),
+        ),
+    ]
+    prices = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=63_500.0,
+            open=66_500.0,
+            high=66_700.0,
+            low=63_200.0,
+            prev_close=66_200.0,
+            timestamp=1712190000,
+            asset_class="spot",
+            session_volume=28_000.0,
+            volume_ratio=2.4,
+        ),
+        PriceQuote(
+            symbol_id="sol_usd",
+            current=124.0,
+            open=120.0,
+            high=126.0,
+            low=119.0,
+            prev_close=118.5,
+            timestamp=1712190300,
+            asset_class="spot",
+            session_volume=9_000.0,
+            volume_ratio=1.0,
+        ),
+    ]
+
+    intents = strategy.generate_trade_intents(
+        detected_events=events,
+        price_quotes=prices,
+        portfolio=portfolio,
+    )
+
+    by_symbol = {
+        symbol_id: [intent for intent in intents if intent.symbol_id == symbol_id]
+        for symbol_id in {intent.symbol_id for intent in intents}
+    }
+
+    assert {intent.symbol_id for intent in intents} == {"btc_usd", "sol_usd"}
+    assert round(sum(intent.notional_usd for intent in by_symbol["btc_usd"]), 2) > round(
+        sum(intent.notional_usd for intent in by_symbol["sol_usd"]),
+        2,
+    )
+    assert all(
+        "reduced-size mode" in " ".join(intent.rationale).lower()
+        for intent in by_symbol["sol_usd"]
+    )
+    assert all(intent.side == "sell" for intent in by_symbol["btc_usd"])
+    assert all(intent.side == "buy" for intent in by_symbol["sol_usd"])
+
+
 def test_strategy_keeps_opposite_direction_thesis_separate() -> None:
     strategy = SimpleEventDrivenStrategy(
         config=StrategyConfig(

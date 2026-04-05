@@ -34,6 +34,27 @@ _EVENT_BIAS: dict[str, float] = {
     "TECHNICAL_BREAKOUTS": 0.7,
 }
 
+_NEWS_SIGNAL_WEIGHT = 0.4
+_PRICE_CONFIRMATION_WEIGHT = 0.35
+_VOLUME_CONFIRMATION_WEIGHT = 0.25
+_NEWS_PRICE_SYNERGY_BONUS = 0.05
+_PRICE_VOLUME_SYNERGY_BONUS = 0.10
+_ALL_CONFIRMATIONS_SYNERGY_BONUS = 0.15
+_DEFAULT_PRICE_CONFIRMATION_THRESHOLD = 0.001
+_DEFAULT_VOLUME_SPIKE_THRESHOLD = 1.5
+_TECHNICAL_BREAKOUT_EVENT_TYPES: frozenset[str] = frozenset(
+    {"TECHNICAL_BREAKOUT", "TECHNICAL_BREAKOUTS"}
+)
+_SHOCK_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "SECURITY_INCIDENT",
+        "EXCHANGE_HACK",
+        "EXCHANGE_HACKS",
+        "STABLECOIN_DEPEG",
+        "NETWORK_OUTAGE",
+    }
+)
+
 _SYMBOL_KEYWORDS: dict[str, tuple[str, ...]] = {
     "btc_usd": ("btc", "bitcoin", "xbt"),
     "eth_usd": ("eth", "ether", "ethereum"),
@@ -131,6 +152,12 @@ class Signal:
     event_novelty_score: float = 1.0
     event_repeat_count: int = 0
     narrative_key: str | None = None
+    news_confirmed: bool = True
+    price_confirmed: bool = False
+    volume_confirmed: bool = False
+    volume_unavailable: bool = False
+    confirmation_count: int = 1
+    confirmation_score: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -254,7 +281,14 @@ def select_quote_for_event(
     return price_quotes[0]
 
 
-def build_signal(*, event: DetectedEvent, quote: PriceQuote) -> Signal:
+def build_signal(
+    *,
+    event: DetectedEvent,
+    quote: PriceQuote,
+    price_confirmation_threshold: float = _DEFAULT_PRICE_CONFIRMATION_THRESHOLD,
+    volume_spike_threshold: float = _DEFAULT_VOLUME_SPIKE_THRESHOLD,
+    technical_breakout_volume_penalty: float = 0.15,
+) -> Signal:
     side = infer_trade_side(event.event_type)
     if side is None:
         raise ValueError(f"Unsupported event type for trading: {event.event_type}")
@@ -262,8 +296,16 @@ def build_signal(*, event: DetectedEvent, quote: PriceQuote) -> Signal:
     base_confidence = min(max(event.confidence, 0.0), 1.0)
     event_bias = abs(_EVENT_BIAS[event.event_type])
     price_move = _price_momentum(quote)
-    aligned_move = max(price_move, 0.0) if side == "buy" else max(-price_move, 0.0)
-    price_bonus = min(aligned_move * 3.0, 0.12)
+    price_confirmed, price_rationale = _price_confirmation_state(
+        side=side,
+        price_move=price_move,
+        threshold=price_confirmation_threshold,
+    )
+    volume_confirmed, volume_unavailable, volume_rationale = _volume_confirmation_state(
+        quote=quote,
+        threshold=volume_spike_threshold,
+    )
+
     volatility_multiplier, volatility_rationale = _volatility_adjustment(quote)
     event_novelty_score, novelty_rationale = _event_novelty_adjustment(event)
     novelty_multiplier = 0.65 + (event_novelty_score * 0.35)
@@ -271,23 +313,61 @@ def build_signal(*, event: DetectedEvent, quote: PriceQuote) -> Signal:
         max(base_confidence * volatility_multiplier * novelty_multiplier, 0.0),
         1.0,
     )
-    score = min(
-        1.0,
-        round(
-            (effective_confidence * 0.7)
-            + (event_bias * 0.18)
-            + price_bonus
-            + (event_novelty_score * 0.04),
-            4,
-        ),
+
+    news_confirmed = True
+    confirmation_count = sum((news_confirmed, price_confirmed, volume_confirmed))
+    confirmation_score = _weighted_confirmation_score(
+        news_confirmed=news_confirmed,
+        price_confirmed=price_confirmed,
+        volume_confirmed=volume_confirmed,
     )
+    synergy_bonus = _confirmation_synergy_bonus(
+        news_confirmed=news_confirmed,
+        price_confirmed=price_confirmed,
+        volume_confirmed=volume_confirmed,
+    )
+    quality_adjustment = round(
+        ((effective_confidence - 0.5) * 0.12)
+        + ((event_novelty_score - 0.5) * 0.06)
+        + (event_bias * 0.01),
+        4,
+    )
+    score = _clamp_signal_score(confirmation_score + synergy_bonus + quality_adjustment)
 
     bias_label = "bullish" if side == "buy" else "bearish"
     rationale_items = [
         f"{bias_label.title()} event bias from {event.event_type}",
         f"Event confidence contributed {base_confidence:.2f} to the opportunity score.",
-        f"Price confirmation move: {price_move * 100:.2f}% from the session open.",
+        price_rationale,
+        (
+            f"Weighted confirmation score reached {confirmation_score:.2f} from "
+            f"{confirmation_count} active signal(s) "
+            f"(news={_NEWS_SIGNAL_WEIGHT:.2f}, price={_PRICE_CONFIRMATION_WEIGHT:.2f}, "
+            f"volume={_VOLUME_CONFIRMATION_WEIGHT:.2f})."
+        ),
     ]
+    if synergy_bonus > 0:
+        rationale_items.append(
+            f"Signal synergy bonus added {synergy_bonus:.2f} after multiple confirmations aligned."
+        )
+    if volume_rationale is not None:
+        rationale_items.append(volume_rationale)
+    if event.event_type in _SHOCK_EVENT_TYPES and not price_confirmed:
+        score = _clamp_signal_score(score + 0.25)
+        rationale_items.append(
+            "Shock-event severity kept the setup actionable even before "
+            "full price confirmation arrived."
+        )
+    if (
+        event.event_type in _TECHNICAL_BREAKOUT_EVENT_TYPES
+        and not volume_confirmed
+        and not volume_unavailable
+    ):
+        score = _clamp_signal_score(score - technical_breakout_volume_penalty)
+        rationale_items.append(
+            "Technical breakout lacked a confirming volume spike, so the "
+            "setup was downgraded into reduced-size mode."
+        )
     if novelty_rationale is not None:
         rationale_items.append(novelty_rationale)
     if volatility_rationale is not None:
@@ -325,6 +405,12 @@ def build_signal(*, event: DetectedEvent, quote: PriceQuote) -> Signal:
         event_novelty_score=event_novelty_score,
         event_repeat_count=max(event.repeat_count, 0),
         narrative_key=event.narrative_key,
+        news_confirmed=news_confirmed,
+        price_confirmed=price_confirmed,
+        volume_confirmed=volume_confirmed,
+        volume_unavailable=volume_unavailable,
+        confirmation_count=confirmation_count,
+        confirmation_score=confirmation_score,
     )
 
 
@@ -400,6 +486,124 @@ def _event_novelty_adjustment(event: DetectedEvent) -> tuple[float, str | None]:
         "Repeated narrative lowered novelty to "
         f"{novelty_score:.2f} after {repeat_count} prior occurrence(s).",
     )
+
+
+def _weighted_confirmation_score(
+    *,
+    news_confirmed: bool,
+    price_confirmed: bool,
+    volume_confirmed: bool,
+) -> float:
+    score = 0.0
+    if news_confirmed:
+        score += _NEWS_SIGNAL_WEIGHT
+    if price_confirmed:
+        score += _PRICE_CONFIRMATION_WEIGHT
+    if volume_confirmed:
+        score += _VOLUME_CONFIRMATION_WEIGHT
+    return round(min(score, 1.0), 4)
+
+
+def _confirmation_synergy_bonus(
+    *,
+    news_confirmed: bool,
+    price_confirmed: bool,
+    volume_confirmed: bool,
+) -> float:
+    if news_confirmed and price_confirmed and volume_confirmed:
+        return _ALL_CONFIRMATIONS_SYNERGY_BONUS
+    if price_confirmed and volume_confirmed:
+        return _PRICE_VOLUME_SYNERGY_BONUS
+    if news_confirmed and price_confirmed:
+        return _NEWS_PRICE_SYNERGY_BONUS
+    return 0.0
+
+
+def _price_confirmation_state(
+    *,
+    side: TradeSide,
+    price_move: float,
+    threshold: float,
+) -> tuple[bool, str]:
+    abs_move_percent = abs(price_move) * 100
+    threshold = max(threshold, 0.0)
+
+    if side == "buy":
+        if price_move >= threshold:
+            return (
+                True,
+                "Price confirmation via breakout supported the bullish "
+                f"thesis with a {price_move * 100:.2f}% move from the session open.",
+            )
+        if price_move <= -threshold:
+            return (
+                False,
+                "Price moved against the bullish thesis by "
+                f"{abs_move_percent:.2f}%, so confirmation is not active yet.",
+            )
+        return (
+            False,
+            "Price confirmation is still pending for the bullish thesis; "
+            f"the move from the session open is only {price_move * 100:.2f}%.",
+        )
+
+    if price_move <= -threshold:
+        return (
+            True,
+            "Price confirmation from the price breakdown supported the "
+            f"bearish thesis with a {abs_move_percent:.2f}% move from the session open.",
+        )
+    if price_move >= threshold:
+        return (
+            False,
+            "Price moved against the bearish thesis by "
+            f"{price_move * 100:.2f}%, so confirmation is not active yet.",
+        )
+    return (
+        False,
+        "Price confirmation is still pending for the bearish thesis; the "
+        f"move from the session open is only {price_move * 100:.2f}%.",
+    )
+
+
+def _volume_confirmation_state(
+    *,
+    quote: PriceQuote,
+    threshold: float,
+) -> tuple[bool, bool, str | None]:
+    volume_ratio = quote.volume_ratio
+    if volume_ratio is None:
+        return (
+            False,
+            True,
+            "Volume confirmation is unavailable for this quote, so the "
+            "setup stays below max confidence.",
+        )
+
+    session_volume_label = (
+        f" on {quote.session_volume:,.2f} units traded"
+        if quote.session_volume is not None and quote.session_volume > 0
+        else ""
+    )
+    if volume_ratio >= max(threshold, 0.0):
+        return (
+            True,
+            False,
+            "Volume spike confirmed at "
+            f"{volume_ratio:.2f}x the recent baseline{session_volume_label}.",
+        )
+
+    return (
+        False,
+        False,
+        "Volume stayed muted at "
+        f"{volume_ratio:.2f}x the recent baseline{session_volume_label}; "
+        f"it needs {max(threshold, 0.0):.2f}x for confirmation.",
+    )
+
+
+def _clamp_signal_score(value: float) -> float:
+    return round(min(max(value, 0.0), 1.0), 4)
 
 
 def _price_momentum(quote: PriceQuote) -> float:
