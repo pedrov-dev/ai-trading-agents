@@ -129,6 +129,197 @@ def test_strategy_skips_low_score_or_risk_blocked_setups() -> None:
     assert intents == []
 
 
+def test_strategy_decays_repeated_same_thesis_within_cooldown() -> None:
+    strategy = SimpleEventDrivenStrategy(
+        config=StrategyConfig(
+            min_signal_score=0.7,
+            thesis_cooldown_hours=6,
+            thesis_repeat_penalty=0.12,
+        )
+    )
+    portfolio = PortfolioSnapshot(total_equity=10_000.0, cash_usd=10_000.0)
+    prices = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=68_000.0,
+            open=66_000.0,
+            high=68_500.0,
+            low=65_500.0,
+            prev_close=65_800.0,
+            timestamp=1712100000,
+            asset_class="spot",
+        )
+    ]
+
+    first_intents = strategy.generate_trade_intents(
+        detected_events=[
+            DetectedEvent(
+                raw_event_id="evt-cooldown",
+                event_type="ETF_APPROVAL",
+                rule_name="etf_approval",
+                confidence=0.82,
+                matched_text="bitcoin etf approval",
+                detected_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC),
+            )
+        ],
+        price_quotes=prices,
+        portfolio=portfolio,
+    )
+    repeated_intents = strategy.generate_trade_intents(
+        detected_events=[
+            DetectedEvent(
+                raw_event_id="evt-cooldown",
+                event_type="ETF_APPROVAL",
+                rule_name="etf_approval",
+                confidence=0.82,
+                matched_text="bitcoin etf approval",
+                detected_at=datetime(2026, 4, 3, 13, 0, tzinfo=UTC),
+            )
+        ],
+        price_quotes=prices,
+        portfolio=portfolio,
+    )
+
+    assert len(first_intents) == 4
+    assert len(repeated_intents) == 4
+    assert first_intents[0].confidence_score is not None
+    assert repeated_intents[0].confidence_score is not None
+    assert repeated_intents[0].confidence_score < first_intents[0].confidence_score
+    assert any("cooldown" in reason.lower() for reason in repeated_intents[0].rationale)
+
+
+def test_strategy_blocks_repeated_same_thesis_until_new_event_arrives() -> None:
+    strategy = SimpleEventDrivenStrategy(
+        config=StrategyConfig(
+            min_signal_score=0.7,
+            thesis_cooldown_hours=6,
+            thesis_repeat_penalty=0.16,
+        )
+    )
+    portfolio = PortfolioSnapshot(total_equity=10_000.0, cash_usd=10_000.0)
+    prices = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=68_000.0,
+            open=66_000.0,
+            high=68_500.0,
+            low=65_500.0,
+            prev_close=65_800.0,
+            timestamp=1712100000,
+            asset_class="spot",
+        )
+    ]
+
+    base_time = datetime(2026, 4, 3, 12, 0, tzinfo=UTC)
+    for hour_offset in range(4):
+        strategy.generate_trade_intents(
+            detected_events=[
+                DetectedEvent(
+                    raw_event_id="evt-repeat",
+                    event_type="ETF_APPROVAL",
+                    rule_name="etf_approval",
+                    confidence=0.82,
+                    matched_text="bitcoin etf approval",
+                    detected_at=base_time.replace(hour=12 + hour_offset),
+                )
+            ],
+            price_quotes=prices,
+            portfolio=portfolio,
+        )
+
+    blocked_intents = strategy.generate_trade_intents(
+        detected_events=[
+            DetectedEvent(
+                raw_event_id="evt-repeat",
+                event_type="ETF_APPROVAL",
+                rule_name="etf_approval",
+                confidence=0.82,
+                matched_text="bitcoin etf approval",
+                detected_at=datetime(2026, 4, 3, 16, 30, tzinfo=UTC),
+            )
+        ],
+        price_quotes=prices,
+        portfolio=portfolio,
+    )
+    refreshed_intents = strategy.generate_trade_intents(
+        detected_events=[
+            DetectedEvent(
+                raw_event_id="evt-fresh",
+                event_type="ETF_APPROVAL",
+                rule_name="etf_approval",
+                confidence=0.82,
+                matched_text="bitcoin etf approval on fresh headline",
+                detected_at=datetime(2026, 4, 3, 17, 0, tzinfo=UTC),
+            )
+        ],
+        price_quotes=prices,
+        portfolio=portfolio,
+    )
+
+    assert blocked_intents == []
+    assert len(refreshed_intents) == 4
+    assert refreshed_intents[0].confidence_score is not None
+    assert refreshed_intents[0].confidence_score >= 0.7
+
+
+def test_strategy_expires_cooldown_after_six_hours() -> None:
+    strategy = SimpleEventDrivenStrategy(
+        config=StrategyConfig(
+            min_signal_score=0.7,
+            thesis_cooldown_hours=6,
+            thesis_repeat_penalty=0.12,
+        )
+    )
+    portfolio = PortfolioSnapshot(total_equity=10_000.0, cash_usd=10_000.0)
+    prices = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=68_000.0,
+            open=66_000.0,
+            high=68_500.0,
+            low=65_500.0,
+            prev_close=65_800.0,
+            timestamp=1712100000,
+            asset_class="spot",
+        )
+    ]
+
+    first_intents = strategy.generate_trade_intents(
+        detected_events=[
+            DetectedEvent(
+                raw_event_id="evt-expire",
+                event_type="ETF_APPROVAL",
+                rule_name="etf_approval",
+                confidence=0.82,
+                matched_text="bitcoin etf approval",
+                detected_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC),
+            )
+        ],
+        price_quotes=prices,
+        portfolio=portfolio,
+    )
+    expired_window_intents = strategy.generate_trade_intents(
+        detected_events=[
+            DetectedEvent(
+                raw_event_id="evt-expire",
+                event_type="ETF_APPROVAL",
+                rule_name="etf_approval",
+                confidence=0.82,
+                matched_text="bitcoin etf approval",
+                detected_at=datetime(2026, 4, 3, 19, 30, tzinfo=UTC),
+            )
+        ],
+        price_quotes=prices,
+        portfolio=portfolio,
+    )
+
+    assert len(first_intents) == 4
+    assert len(expired_window_intents) == 4
+    assert first_intents[0].confidence_score is not None
+    assert expired_window_intents[0].confidence_score is not None
+    assert expired_window_intents[0].confidence_score == first_intents[0].confidence_score
+
+
 def test_strategy_generates_exit_intent_when_take_profit_is_hit() -> None:
     strategy = SimpleEventDrivenStrategy(
         exit_config=ExitConfig(

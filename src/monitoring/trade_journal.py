@@ -88,7 +88,11 @@ class TradeJournalEntry:
         expected_move = (
             before_position.expected_move
             if before_position is not None and before_position.expected_move is not None
-            else ("up" if before_position is not None and before_position.side == "long" else "down")
+            else (
+                "up"
+                if before_position is not None and before_position.side == "long"
+                else "down"
+            )
         )
         confidence_score = (
             before_position.confidence_score

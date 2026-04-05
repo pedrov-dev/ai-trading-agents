@@ -32,4 +32,5 @@ intents = strategy.generate_trade_intents(detected_events, price_quotes, LocalPo
 
 ## Notes
 
+- `StrategyConfig` now includes a thesis-level cooldown (`thesis_cooldown_enabled`, `thesis_cooldown_hours`, `thesis_repeat_penalty`) so repeated `symbol + thesis + side` replays are decayed and eventually blocked until a fresh event arrives.
 - Tune `StrategyConfig`/`RiskConfig` for deployment; `LocalPortfolioStateProvider` is in-memory and non-persistent; `build_signal` raises for unsupported event types.

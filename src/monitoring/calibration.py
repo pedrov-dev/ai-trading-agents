@@ -85,9 +85,15 @@ def build_calibration_summary(
         )
 
     outcomes = [1.0 if entry.prediction_correct else 0.0 for entry in resolved_entries]
-    confidences = [float(entry.confidence_score) for entry in resolved_entries]
+    confidences = [
+        entry.confidence_score if entry.confidence_score is not None else 0.0
+        for entry in resolved_entries
+    ]
     brier_score = round(
-        sum((confidence - outcome) ** 2 for confidence, outcome in zip(confidences, outcomes))
+        sum(
+            (confidence - outcome) ** 2
+            for confidence, outcome in zip(confidences, outcomes, strict=True)
+        )
         / len(resolved_entries),
         4,
     )
@@ -100,7 +106,10 @@ def build_calibration_summary(
         bucket_entries = [
             entry
             for entry in resolved_entries
-            if _bucket_index(float(entry.confidence_score)) == bucket_index
+            if _bucket_index(
+                entry.confidence_score if entry.confidence_score is not None else 0.0
+            )
+            == bucket_index
         ]
         if not bucket_entries:
             continue
@@ -110,7 +119,11 @@ def build_calibration_summary(
             4,
         )
         average_confidence = round(
-            sum(float(entry.confidence_score) for entry in bucket_entries) / len(bucket_entries),
+            sum(
+                entry.confidence_score if entry.confidence_score is not None else 0.0
+                for entry in bucket_entries
+            )
+            / len(bucket_entries),
             4,
         )
         bucket_rows.append(

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 
 from agent.portfolio import PortfolioSnapshot, Position
 from agent.risk import RiskCheckResult, RiskConfig, RiskManager
@@ -25,6 +25,18 @@ class StrategyConfig:
 
     min_signal_score: float = 0.7
     max_intents_per_cycle: int = 2
+    thesis_cooldown_enabled: bool = True
+    thesis_cooldown_hours: int = 6
+    thesis_repeat_penalty: float = 0.12
+
+
+@dataclass(frozen=True)
+class _ThesisCooldownState:
+    """Recent history for one thesis key used to suppress repeated replays."""
+
+    last_seen_at: datetime
+    last_raw_event_id: str
+    repeat_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -68,6 +80,7 @@ class SimpleEventDrivenStrategy:
         self._config = config or StrategyConfig()
         self._risk_manager = RiskManager(risk_config or RiskConfig())
         self._exit_config = exit_config or ExitConfig()
+        self._thesis_cooldowns: dict[tuple[str, str, str], _ThesisCooldownState] = {}
 
     def generate_trade_intents(
         self,
@@ -88,6 +101,7 @@ class SimpleEventDrivenStrategy:
             except ValueError:
                 continue
 
+            signal = self._apply_thesis_cooldown(signal=signal)
             if signal.score < self._config.min_signal_score:
                 continue
 
@@ -133,6 +147,60 @@ class SimpleEventDrivenStrategy:
                 break
 
         return intents
+
+    def _apply_thesis_cooldown(self, *, signal: Signal) -> Signal:
+        """Decay repeated same-thesis signals so the strategy seeks fresh setups."""
+        if (
+            not self._config.thesis_cooldown_enabled
+            or self._config.thesis_cooldown_hours <= 0
+            or self._config.thesis_repeat_penalty <= 0
+        ):
+            return signal
+
+        thesis_key = (
+            signal.symbol_id,
+            signal.event_group or signal.event_type,
+            signal.side,
+        )
+        cooldown_window = timedelta(hours=self._config.thesis_cooldown_hours)
+        previous_state = self._thesis_cooldowns.get(thesis_key)
+        repeat_count = 0
+        adjusted_signal = signal
+
+        if previous_state is not None:
+            within_window = signal.generated_at < previous_state.last_seen_at + cooldown_window
+            same_raw_event = signal.raw_event_id == previous_state.last_raw_event_id
+
+            if within_window and same_raw_event:
+                repeat_count = previous_state.repeat_count + 1
+                penalty = min(
+                    self._config.thesis_repeat_penalty * repeat_count,
+                    max(signal.score - 0.01, 0.0),
+                )
+                adjusted_score = round(max(signal.score - penalty, 0.0), 4)
+                adjusted_confidence = round(
+                    max(0.0, min(signal.confidence, adjusted_score)),
+                    4,
+                )
+                adjusted_signal = replace(
+                    signal,
+                    confidence=adjusted_confidence,
+                    score=adjusted_score,
+                    rationale=signal.rationale
+                    + (
+                        "Signal cooldown active for repeated thesis "
+                        f"{signal.event_type} on {signal.symbol_id}; "
+                        f"confidence reduced by {penalty:.2f} inside the "
+                        f"{self._config.thesis_cooldown_hours}h window.",
+                    ),
+                )
+
+        self._thesis_cooldowns[thesis_key] = _ThesisCooldownState(
+            last_seen_at=signal.generated_at,
+            last_raw_event_id=signal.raw_event_id,
+            repeat_count=repeat_count,
+        )
+        return adjusted_signal
 
     def evaluate_position_exits(
         self,
