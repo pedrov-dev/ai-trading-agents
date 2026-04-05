@@ -43,6 +43,8 @@ def test_strategy_generates_trade_intent_for_high_confidence_event() -> None:
     assert all(intent.side == "buy" for intent in intents)
     assert sum(intent.notional_usd for intent in intents) > 0
     assert [intent.exit_horizon_label for intent in intents] == ["5m", "30m", "4h", "24h"]
+    assert all(intent.event_type == "ETF_APPROVAL" for intent in intents)
+    assert all(intent.event_group == "etf_news" for intent in intents)
     assert all(any("ETF_APPROVAL" in reason for reason in intent.rationale) for intent in intents)
 
 
@@ -171,6 +173,7 @@ def test_strategy_generates_exit_intent_when_take_profit_is_hit() -> None:
     assert len(intents) == 1
     assert intents[0].symbol_id == "btc_usd"
     assert intents[0].side == "sell"
+    assert intents[0].event_group is None
     assert intents[0].quantity == 0.01
     assert any("profit" in reason.lower() for reason in intents[0].rationale)
 

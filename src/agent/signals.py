@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from detection.event_detection import DetectedEvent
+from detection.event_types import event_performance_group
 from ingestion.prices_ingestion import PriceQuote
 
 TradeSide = Literal["buy", "sell"]
@@ -21,6 +22,14 @@ _EVENT_BIAS: dict[str, float] = {
     "STABLECOIN_DEPEG": -0.95,
     "SECURITY_INCIDENT": -0.95,
     "NETWORK_OUTAGE": -0.65,
+    "ETF_NEWS": 0.8,
+    "REGULATORY_NEWS": -0.35,
+    "EXCHANGE_HACK": -0.95,
+    "EXCHANGE_HACKS": -0.95,
+    "MACRO_NEWS": 0.25,
+    "WHALE_ACTIVITY": 0.65,
+    "TECHNICAL_BREAKOUT": 0.7,
+    "TECHNICAL_BREAKOUTS": 0.7,
 }
 
 _SYMBOL_KEYWORDS: dict[str, tuple[str, ...]] = {
@@ -46,6 +55,7 @@ class Signal:
     current_price: float
     generated_at: datetime
     rationale: tuple[str, ...]
+    event_group: str | None = None
     signal_id: str | None = None
 
 
@@ -64,6 +74,7 @@ class TradeIntent:
     signal_id: str | None = None
     raw_event_id: str | None = None
     event_type: str | None = None
+    event_group: str | None = None
     exit_horizon_label: str | None = None
     max_hold_minutes: int | None = None
     exit_due_at: datetime | None = None
@@ -136,6 +147,7 @@ def build_signal(*, event: DetectedEvent, quote: PriceQuote) -> Signal:
         current_price=quote.current,
         generated_at=generated_at,
         rationale=rationale,
+        event_group=event_performance_group(event.event_type),
     )
 
 
@@ -178,6 +190,7 @@ def build_trade_intent(
         signal_id=resolved_signal_id,
         raw_event_id=signal.raw_event_id,
         event_type=signal.event_type,
+        event_group=signal.event_group,
         exit_horizon_label=exit_horizon_label,
         max_hold_minutes=max_hold_minutes,
         exit_due_at=horizon_due_at,

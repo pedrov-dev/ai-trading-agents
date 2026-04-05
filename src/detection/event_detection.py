@@ -155,6 +155,48 @@ class RuleBasedEventDetector:
                 patterns=(r"\b(upgrade|hard fork|soft fork|mainnet launch)\b",),
                 confidence=0.75,
             ),
+            EventRule(
+                name="macro_news",
+                event_type="MACRO_NEWS",
+                keywords=(
+                    "fed rate cut",
+                    "fed pause",
+                    "inflation cooled",
+                    "cpi cooled",
+                    "jobs report",
+                    "stimulus package",
+                ),
+                patterns=(
+                    r"\b(fed|fomc|ecb|boj|cpi|inflation|jobs report|payrolls|rate cut|rate hike)\b",
+                ),
+                confidence=0.68,
+            ),
+            EventRule(
+                name="whale_activity",
+                event_type="WHALE_ACTIVITY",
+                keywords=(
+                    "whale accumulation",
+                    "whale moved",
+                    "large wallet",
+                    "mega transfer",
+                    "on-chain whale",
+                ),
+                patterns=(r"\b(whale|wallet|on-chain).*(bought|accumulated|moved|transferred|withdrew)\b",),
+                confidence=0.78,
+            ),
+            EventRule(
+                name="technical_breakout",
+                event_type="TECHNICAL_BREAKOUT",
+                keywords=(
+                    "technical breakout",
+                    "breaks resistance",
+                    "breakout above",
+                    "breakdown below",
+                    "trendline breakout",
+                ),
+                patterns=(r"\b(breakout|breakdown|breaks resistance|breaks support|trendline)\b",),
+                confidence=0.72,
+            ),
         ]
 
 

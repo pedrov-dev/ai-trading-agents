@@ -47,6 +47,7 @@ class OrderRequest:
     signal_id: str | None = None
     raw_event_id: str | None = None
     event_type: str | None = None
+    event_group: str | None = None
     exit_horizon_label: str | None = None
     max_hold_minutes: int | None = None
     exit_due_at: datetime | None = None
@@ -92,6 +93,7 @@ class OrderRequest:
             signal_id=intent.signal_id,
             raw_event_id=intent.raw_event_id,
             event_type=intent.event_type,
+            event_group=intent.event_group,
             exit_horizon_label=intent.exit_horizon_label,
             max_hold_minutes=intent.max_hold_minutes,
             exit_due_at=intent.exit_due_at,
@@ -117,6 +119,7 @@ class OrderRequest:
             "signal_id": self.signal_id,
             "raw_event_id": self.raw_event_id,
             "event_type": self.event_type,
+            "event_group": self.event_group,
             "exit_horizon_label": self.exit_horizon_label,
             "max_hold_minutes": self.max_hold_minutes,
             "exit_due_at": self.exit_due_at.isoformat() if self.exit_due_at else None,

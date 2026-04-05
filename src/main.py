@@ -178,6 +178,7 @@ class RuntimeCycleResult:
                     "signal_id": intent.signal_id,
                     "raw_event_id": intent.raw_event_id,
                     "event_type": intent.event_type,
+                    "event_group": intent.event_group,
                     "exit_horizon_label": intent.exit_horizon_label,
                     "position_id": intent.position_id,
                     "rationale": list(intent.rationale),
@@ -251,6 +252,7 @@ class RuntimeCycleResult:
                     "signal_id": intent.signal_id,
                     "raw_event_id": intent.raw_event_id,
                     "event_type": intent.event_type,
+                    "event_group": intent.event_group,
                     "exit_horizon_label": intent.exit_horizon_label,
                     "position_id": intent.position_id,
                 }
@@ -275,6 +277,7 @@ class RuntimeCycleResult:
                     "signal_id": result.request.signal_id,
                     "raw_event_id": result.request.raw_event_id,
                     "event_type": result.request.event_type,
+                    "event_group": result.request.event_group,
                     "exit_horizon_label": result.request.exit_horizon_label,
                     "position_id": result.request.position_id,
                     "completed_at": result.completed_at.isoformat(),
@@ -310,6 +313,11 @@ class RuntimeCycleResult:
                 "loss_count": self.journal_summary.loss_count,
                 "event_counts": dict(self.journal_summary.event_counts),
                 "symbol_counts": dict(self.journal_summary.symbol_counts),
+                "source_event_counts": dict(self.journal_summary.source_event_counts),
+                "event_performance": {
+                    event_type: metrics.to_dict()
+                    for event_type, metrics in self.journal_summary.event_performance.items()
+                },
                 "open_positions": dict(self.journal_summary.open_positions),
                 "last_recorded_at": self.journal_summary.last_recorded_at.isoformat()
                 if self.journal_summary.last_recorded_at

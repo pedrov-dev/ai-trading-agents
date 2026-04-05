@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -14,6 +15,7 @@ from agent.portfolio import (
     PortfolioSnapshot,
     Position,
 )
+from detection.event_types import event_performance_group
 from execution.orders import ExecutionResult
 from storage.local_runtime import JsonlFileStore
 
@@ -39,11 +41,13 @@ class TradeJournalEntry:
     signal_id: str | None = None
     raw_event_id: str | None = None
     source_event_type: str | None = None
+    source_event_group: str | None = None
     exit_horizon_label: str | None = None
     max_hold_minutes: int | None = None
     exit_due_at: datetime | None = None
     intent_id: str | None = None
     client_order_id: str | None = None
+    realized_return_fraction: float | None = None
     notes: tuple[str, ...] = ()
 
     @classmethod
@@ -104,11 +108,21 @@ class TradeJournalEntry:
             signal_id=execution_result.request.signal_id,
             raw_event_id=execution_result.request.raw_event_id,
             source_event_type=execution_result.request.event_type,
+            source_event_group=event_performance_group(execution_result.request.event_type),
             exit_horizon_label=execution_result.request.exit_horizon_label,
             max_hold_minutes=execution_result.request.max_hold_minutes,
             exit_due_at=execution_result.request.exit_due_at,
             intent_id=execution_result.request.intent_id,
             client_order_id=execution_result.request.client_order_id,
+            realized_return_fraction=_calculate_realized_return_fraction(
+                before_position=before_position,
+                filled_quantity=fill.filled_quantity,
+                realized_pnl_usd=realized_change,
+                journal_event_type=_derive_event_type(
+                    before_position=before_position,
+                    after_position=after_position,
+                ),
+            ),
             notes=tuple(str(item) for item in notes),
         )
 
@@ -121,11 +135,21 @@ class TradeJournalEntry:
         signal_id = payload.get("signal_id")
         raw_event_id = payload.get("raw_event_id")
         source_event_type = payload.get("source_event_type")
+        source_event_group = payload.get("source_event_group")
         exit_horizon_label = payload.get("exit_horizon_label")
         max_hold_minutes = payload.get("max_hold_minutes")
         exit_due_at = payload.get("exit_due_at")
         intent_id = payload.get("intent_id")
         client_order_id = payload.get("client_order_id")
+        realized_return_fraction = payload.get("realized_return_fraction")
+        resolved_source_event_type = (
+            str(source_event_type) if source_event_type is not None else None
+        )
+        resolved_source_event_group = (
+            str(source_event_group)
+            if source_event_group is not None
+            else event_performance_group(resolved_source_event_type)
+        )
         return cls(
             entry_id=str(payload.get("entry_id", "journal-entry")),
             recorded_at=_parse_datetime(payload.get("recorded_at")),
@@ -145,9 +169,8 @@ class TradeJournalEntry:
             position_id=str(position_id) if position_id is not None else None,
             signal_id=str(signal_id) if signal_id is not None else None,
             raw_event_id=str(raw_event_id) if raw_event_id is not None else None,
-            source_event_type=(
-                str(source_event_type) if source_event_type is not None else None
-            ),
+            source_event_type=resolved_source_event_type,
+            source_event_group=resolved_source_event_group,
             exit_horizon_label=(
                 str(exit_horizon_label) if exit_horizon_label is not None else None
             ),
@@ -160,6 +183,11 @@ class TradeJournalEntry:
             intent_id=str(intent_id) if intent_id is not None else None,
             client_order_id=(
                 str(client_order_id) if client_order_id is not None else None
+            ),
+            realized_return_fraction=(
+                float(realized_return_fraction)
+                if realized_return_fraction is not None
+                else None
             ),
             notes=tuple(str(item) for item in payload.get("notes", ())),
         )
@@ -182,12 +210,32 @@ class TradeJournalEntry:
             "signal_id": self.signal_id,
             "raw_event_id": self.raw_event_id,
             "source_event_type": self.source_event_type,
+            "source_event_group": self.source_event_group,
             "exit_horizon_label": self.exit_horizon_label,
             "max_hold_minutes": self.max_hold_minutes,
             "exit_due_at": self.exit_due_at.isoformat() if self.exit_due_at else None,
             "intent_id": self.intent_id,
             "client_order_id": self.client_order_id,
+            "realized_return_fraction": self.realized_return_fraction,
             "notes": list(self.notes),
+        }
+
+
+@dataclass(frozen=True)
+class EventTypePerformance:
+    """Aggregate realized performance metrics for one signal event bucket."""
+
+    avg_return: float
+    hit_rate: float
+    sharpe: float
+    trade_count: int
+
+    def to_dict(self) -> dict[str, float | int]:
+        return {
+            "avg_return": self.avg_return,
+            "hit_rate": self.hit_rate,
+            "sharpe": self.sharpe,
+            "trade_count": self.trade_count,
         }
 
 
@@ -203,6 +251,8 @@ class TradeJournalSummary:
     loss_count: int
     event_counts: dict[str, int]
     symbol_counts: dict[str, int]
+    source_event_counts: dict[str, int] = field(default_factory=dict)
+    event_performance: dict[str, EventTypePerformance] = field(default_factory=dict)
     open_positions: dict[str, dict[str, Any]] = field(default_factory=dict)
     recent_entries: tuple[TradeJournalEntry, ...] = ()
     last_recorded_at: datetime | None = None
@@ -217,6 +267,11 @@ class TradeJournalSummary:
             "loss_count": self.loss_count,
             "event_counts": self.event_counts,
             "symbol_counts": self.symbol_counts,
+            "source_event_counts": self.source_event_counts,
+            "event_performance": {
+                event_type: metrics.to_dict()
+                for event_type, metrics in self.event_performance.items()
+            },
             "open_positions": self.open_positions,
             "recent_entries": [entry.to_dict() for entry in self.recent_entries],
             "last_recorded_at": self.last_recorded_at.isoformat()
@@ -308,6 +363,9 @@ def build_trade_journal_summary(
     ordered = tuple(sorted(entries, key=lambda item: item.recorded_at))
     event_counts = Counter(entry.event_type for entry in ordered)
     symbol_counts = Counter(entry.symbol_id for entry in ordered)
+    source_event_counts = Counter(
+        entry.source_event_group for entry in ordered if entry.source_event_group
+    )
     close_entries = [entry for entry in ordered if entry.event_type in _CLOSE_EVENT_TYPES]
     open_positions: dict[str, dict[str, Any]] = {}
 
@@ -323,6 +381,8 @@ def build_trade_journal_summary(
             "entry_price": entry.position_entry_price,
             "signal_id": entry.signal_id,
             "raw_event_id": entry.raw_event_id,
+            "source_event_type": entry.source_event_type,
+            "source_event_group": entry.source_event_group,
             "exit_horizon_label": entry.exit_horizon_label,
             "max_hold_minutes": entry.max_hold_minutes,
             "exit_due_at": entry.exit_due_at.isoformat() if entry.exit_due_at else None,
@@ -339,6 +399,8 @@ def build_trade_journal_summary(
         loss_count=sum(1 for entry in close_entries if entry.realized_pnl_usd < 0),
         event_counts=dict(event_counts),
         symbol_counts=dict(symbol_counts),
+        source_event_counts=dict(source_event_counts),
+        event_performance=_build_event_performance(close_entries),
         open_positions=open_positions,
         recent_entries=ordered[-recent_entry_limit:],
         last_recorded_at=ordered[-1].recorded_at if ordered else None,
@@ -375,6 +437,62 @@ def _derive_event_type(
     if after_position.quantity < before_position.quantity:
         return "partial_exit"
     return "rebalance"
+
+
+def _build_event_performance(
+    close_entries: list[TradeJournalEntry],
+) -> dict[str, EventTypePerformance]:
+    grouped_returns: dict[str, list[float]] = {}
+
+    for entry in close_entries:
+        if entry.source_event_group is None or entry.realized_return_fraction is None:
+            continue
+        grouped_returns.setdefault(entry.source_event_group, []).append(
+            entry.realized_return_fraction
+        )
+
+    return {
+        event_type: EventTypePerformance(
+            avg_return=round(sum(returns) / len(returns), 6),
+            hit_rate=round(sum(1 for item in returns if item > 0) / len(returns), 4),
+            sharpe=round(_calculate_sharpe_ratio(returns), 6),
+            trade_count=len(returns),
+        )
+        for event_type, returns in sorted(grouped_returns.items())
+    }
+
+
+def _calculate_realized_return_fraction(
+    *,
+    before_position: Position | None,
+    filled_quantity: float,
+    realized_pnl_usd: float,
+    journal_event_type: str,
+) -> float | None:
+    if journal_event_type not in _CLOSE_EVENT_TYPES:
+        return None
+    if before_position is None or before_position.entry_price <= 0:
+        return None
+
+    closed_quantity = min(abs(before_position.quantity), abs(filled_quantity))
+    entry_notional = closed_quantity * before_position.entry_price
+    if entry_notional <= 0:
+        return None
+
+    return round(realized_pnl_usd / entry_notional, 6)
+
+
+def _calculate_sharpe_ratio(returns: list[float]) -> float:
+    if len(returns) < 2:
+        return 0.0
+
+    mean_return = sum(returns) / len(returns)
+    variance = sum((item - mean_return) ** 2 for item in returns) / (len(returns) - 1)
+    standard_deviation = math.sqrt(variance)
+    if standard_deviation == 0:
+        return 0.0
+
+    return mean_return / standard_deviation * math.sqrt(len(returns))
 
 
 def _parse_datetime(value: Any) -> datetime:

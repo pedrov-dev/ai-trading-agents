@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from agent.signals import build_signal
+from agent.signals import build_signal, build_trade_intent
 from detection.event_detection import DetectedEvent
 from ingestion.prices_ingestion import PriceQuote
 
@@ -30,6 +30,8 @@ def test_build_signal_scores_bullish_event_with_price_confirmation() -> None:
     assert signal.side == "buy"
     assert signal.symbol_id == "btc_usd"
     assert signal.score >= 0.8
+    assert signal.event_group == "etf_news"
+    assert signal.signal_id is not None
     assert any("bullish" in reason.lower() for reason in signal.rationale)
 
 
@@ -58,4 +60,34 @@ def test_build_signal_scores_bearish_event_with_negative_momentum() -> None:
     assert signal.side == "sell"
     assert signal.symbol_id == "eth_usd"
     assert signal.score >= 0.8
+    assert signal.event_group == "exchange_hacks"
     assert any("price confirmation" in reason.lower() for reason in signal.rationale)
+
+
+def test_build_trade_intent_preserves_event_attribution() -> None:
+    event = DetectedEvent(
+        raw_event_id="evt-3",
+        event_type="MACRO_NEWS",
+        rule_name="macro_news",
+        confidence=0.82,
+        matched_text="fed rate cut",
+        detected_at=datetime(2026, 4, 3, tzinfo=UTC),
+    )
+    quote = PriceQuote(
+        symbol_id="btc_usd",
+        current=68_500.0,
+        open=67_900.0,
+        high=68_900.0,
+        low=67_500.0,
+        prev_close=67_700.0,
+        timestamp=1712100000,
+        asset_class="spot",
+    )
+
+    signal = build_signal(event=event, quote=quote)
+    intent = build_trade_intent(signal=signal, notional_usd=500.0)
+
+    assert intent.event_type == "MACRO_NEWS"
+    assert intent.event_group == "macro_news"
+    assert intent.signal_id == signal.signal_id
+    assert intent.notional_usd == 500.0

@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from monitoring.trade_journal import (
     LocalTradeJournal,
     TradeJournalEntry,
+    build_trade_journal_summary,
     build_trade_journal_summary_from_file,
 )
 
@@ -27,6 +28,8 @@ def test_local_trade_journal_appends_and_summarizes_position_lifecycle(tmp_path)
                 position_side="long",
                 position_quantity=0.01,
                 position_entry_price=50_000.0,
+                source_event_type="ETF_APPROVAL",
+                source_event_group="etf_news",
                 notes=("Opened long position.",),
             ),
             TradeJournalEntry(
@@ -41,6 +44,9 @@ def test_local_trade_journal_appends_and_summarizes_position_lifecycle(tmp_path)
                 position_side=None,
                 position_quantity=0.0,
                 position_entry_price=None,
+                source_event_type="ETF_APPROVAL",
+                source_event_group="etf_news",
+                realized_return_fraction=0.04,
                 notes=("Take profit exit.",),
             ),
         )
@@ -49,6 +55,7 @@ def test_local_trade_journal_appends_and_summarizes_position_lifecycle(tmp_path)
     lines = journal_path.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 2
     assert json.loads(lines[0])["event_type"] == "entry"
+    assert json.loads(lines[0])["source_event_type"] == "ETF_APPROVAL"
 
     summary = build_trade_journal_summary_from_file(journal_path)
 
@@ -61,3 +68,65 @@ def test_local_trade_journal_appends_and_summarizes_position_lifecycle(tmp_path)
     assert summary.realized_pnl_usd == 20.0
     assert summary.win_count == 1
     assert summary.loss_count == 0
+    assert summary.source_event_counts["etf_news"] == 2
+    assert summary.event_performance["etf_news"].avg_return == 0.04
+    assert summary.event_performance["etf_news"].hit_rate == 1.0
+    assert summary.event_performance["etf_news"].sharpe == 0.0
+
+
+def test_trade_journal_summarizes_event_type_performance_metrics() -> None:
+    entries = (
+        TradeJournalEntry(
+            entry_id="close-1",
+            recorded_at=_DEF_TIME,
+            symbol_id="btc_usd",
+            side="sell",
+            event_type="full_exit",
+            quantity=0.01,
+            price=52_000.0,
+            realized_pnl_usd=25.0,
+            source_event_type="ETF_APPROVAL",
+            source_event_group="etf_news",
+            realized_return_fraction=0.05,
+        ),
+        TradeJournalEntry(
+            entry_id="close-2",
+            recorded_at=_DEF_TIME.replace(minute=5),
+            symbol_id="eth_usd",
+            side="sell",
+            event_type="full_exit",
+            quantity=0.5,
+            price=3_100.0,
+            realized_pnl_usd=45.0,
+            source_event_type="ETF_DELAY",
+            source_event_group="etf_news",
+            realized_return_fraction=0.03,
+        ),
+        TradeJournalEntry(
+            entry_id="close-3",
+            recorded_at=_DEF_TIME.replace(minute=10),
+            symbol_id="btc_usd",
+            side="sell",
+            event_type="full_exit",
+            quantity=0.01,
+            price=49_000.0,
+            realized_pnl_usd=-10.0,
+            source_event_type="MACRO_NEWS",
+            source_event_group="macro_news",
+            realized_return_fraction=-0.02,
+        ),
+    )
+
+    summary = build_trade_journal_summary(entries, recent_entry_limit=3)
+
+    etf_metrics = summary.event_performance["etf_news"]
+    macro_metrics = summary.event_performance["macro_news"]
+
+    assert etf_metrics.trade_count == 2
+    assert etf_metrics.avg_return == 0.04
+    assert etf_metrics.hit_rate == 1.0
+    assert etf_metrics.sharpe > 0
+    assert macro_metrics.trade_count == 1
+    assert macro_metrics.avg_return == -0.02
+    assert macro_metrics.hit_rate == 0.0
+    assert macro_metrics.sharpe == 0.0
