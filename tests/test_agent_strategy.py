@@ -440,6 +440,137 @@ def test_strategy_keeps_opposite_direction_thesis_separate() -> None:
     assert not any("similar thesis" in reason.lower() for reason in bearish_intents[0].rationale)
 
 
+def test_strategy_ranks_entry_opportunities_and_executes_only_top_n_signals() -> None:
+    strategy = SimpleEventDrivenStrategy(
+        config=StrategyConfig(
+            min_signal_score=0.6,
+            max_ranked_signals_per_cycle=1,
+            confidence_weight=0.1,
+            novelty_weight=0.15,
+            risk_reward_weight=0.15,
+            diversification_weight=0.6,
+        ),
+        risk_config=RiskConfig(max_position_fraction=0.05),
+    )
+    portfolio = PortfolioSnapshot(
+        total_equity=10_000.0,
+        cash_usd=9_000.0,
+        positions=(
+            Position(
+                symbol_id="btc_usd",
+                side="long",
+                quantity=0.01,
+                entry_price=68_000.0,
+                event_type="ETF_APPROVAL",
+            ),
+            Position(
+                symbol_id="eth_usd",
+                side="long",
+                quantity=0.6,
+                entry_price=3_400.0,
+                event_type="TECHNICAL_BREAKOUT",
+            ),
+        ),
+    )
+    events = [
+        DetectedEvent(
+            raw_event_id="evt-sol-breakout",
+            event_type="TECHNICAL_BREAKOUT",
+            rule_name="sol_breakout",
+            confidence=0.9,
+            matched_text="solana breakout extends bullish momentum",
+            detected_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC),
+        ),
+        DetectedEvent(
+            raw_event_id="evt-xrp-regulatory",
+            event_type="REGULATORY_ACTION",
+            rule_name="xrp_sec_pressure",
+            confidence=0.78,
+            matched_text="xrp faces fresh sec enforcement pressure",
+            detected_at=datetime(2026, 4, 3, 12, 5, tzinfo=UTC),
+        ),
+    ]
+    prices = [
+        PriceQuote(
+            symbol_id="sol_usd",
+            current=124.0,
+            open=120.0,
+            high=126.0,
+            low=118.0,
+            prev_close=119.0,
+            timestamp=1712100000,
+            asset_class="spot",
+        ),
+        PriceQuote(
+            symbol_id="xrp_usd",
+            current=0.49,
+            open=0.55,
+            high=0.56,
+            low=0.48,
+            prev_close=0.54,
+            timestamp=1712100000,
+            asset_class="spot",
+        ),
+    ]
+
+    intents = strategy.generate_trade_intents(
+        detected_events=events,
+        price_quotes=prices,
+        portfolio=portfolio,
+    )
+
+    assert len(intents) == 4
+    assert {intent.symbol_id for intent in intents} == {"xrp_usd"}
+    assert all(intent.side == "sell" for intent in intents)
+
+
+def test_strategy_adds_ranking_breakdown_to_selected_intent_rationale() -> None:
+    strategy = SimpleEventDrivenStrategy(
+        config=StrategyConfig(
+            min_signal_score=0.6,
+            confidence_weight=0.35,
+            novelty_weight=0.2,
+            risk_reward_weight=0.25,
+            diversification_weight=0.2,
+        )
+    )
+    portfolio = PortfolioSnapshot(total_equity=10_000.0, cash_usd=10_000.0)
+    prices = [
+        PriceQuote(
+            symbol_id="btc_usd",
+            current=68_000.0,
+            open=66_000.0,
+            high=68_500.0,
+            low=65_500.0,
+            prev_close=65_800.0,
+            timestamp=1712100000,
+            asset_class="spot",
+        )
+    ]
+
+    intents = strategy.generate_trade_intents(
+        detected_events=[
+            DetectedEvent(
+                raw_event_id="evt-ranked",
+                event_type="ETF_APPROVAL",
+                rule_name="etf_approval",
+                confidence=0.9,
+                matched_text="bitcoin etf approval sees strong follow-through",
+                detected_at=datetime(2026, 4, 3, 12, 0, tzinfo=UTC),
+            )
+        ],
+        price_quotes=prices,
+        portfolio=portfolio,
+    )
+
+    ranking_text = " ".join(intents[0].rationale).lower()
+    assert "ranking breakdown" in ranking_text
+    assert "confidence=" in ranking_text
+    assert "novelty=" in ranking_text
+    assert "risk/reward=" in ranking_text
+    assert "diversification=" in ranking_text
+
+
 def test_strategy_generates_exit_intent_when_take_profit_is_hit() -> None:
     strategy = SimpleEventDrivenStrategy(
         exit_config=ExitConfig(

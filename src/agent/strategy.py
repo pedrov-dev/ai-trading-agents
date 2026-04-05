@@ -16,15 +16,21 @@ from agent.signals import (
     select_quote_for_event,
 )
 from detection.event_detection import DetectedEvent
+from detection.event_types import event_performance_group
 from ingestion.prices_ingestion import PriceQuote
 
 
 @dataclass(frozen=True)
 class StrategyConfig:
-    """Thresholds for the MVP event-driven strategy."""
+    """Thresholds and ranking weights for the event-driven strategy."""
 
     min_signal_score: float = 0.7
     max_intents_per_cycle: int = 2
+    max_ranked_signals_per_cycle: int | None = None
+    confidence_weight: float = 0.35
+    novelty_weight: float = 0.2
+    risk_reward_weight: float = 0.25
+    diversification_weight: float = 0.2
     thesis_cooldown_enabled: bool = True
     thesis_cooldown_hours: int = 6
     thesis_repeat_penalty: float = 0.12
@@ -41,6 +47,30 @@ class _ThesisCooldownState:
     thesis_tokens: tuple[str, ...] = ()
     event_key: str | None = None
     repeat_count: int = 0
+
+
+@dataclass(frozen=True)
+class RankedSignal:
+    """Signal plus the multi-factor ranking breakdown used for top-N selection."""
+
+    signal: Signal
+    composite_score: float
+    confidence_score: float
+    novelty_score: float
+    risk_reward_score: float
+    diversification_score: float
+    proposed_notional: float
+    risk_result: RiskCheckResult
+
+    def ranking_rationale(self) -> tuple[str, ...]:
+        return (
+            "Ranking breakdown: "
+            f"confidence={self.confidence_score:.2f}, "
+            f"novelty={self.novelty_score:.2f}, "
+            f"risk/reward={self.risk_reward_score:.2f}, "
+            f"diversification={self.diversification_score:.2f}, "
+            f"composite={self.composite_score:.2f}.",
+        )
 
 
 @dataclass(frozen=True)
@@ -93,7 +123,7 @@ class SimpleEventDrivenStrategy:
         price_quotes: list[PriceQuote],
         portfolio: PortfolioSnapshot,
     ) -> list[TradeIntent]:
-        ranked_signals: dict[str, Signal] = {}
+        ranked_signals: dict[str, RankedSignal] = {}
 
         for event in detected_events:
             quote = select_quote_for_event(event=event, price_quotes=price_quotes)
@@ -101,26 +131,14 @@ class SimpleEventDrivenStrategy:
                 continue
 
             try:
-                signal = build_signal(event=event, quote=quote)
+                base_signal = build_signal(event=event, quote=quote)
             except ValueError:
                 continue
 
-            signal = self._apply_thesis_cooldown(signal=signal)
+            recent_theses = self._recent_thesis_states(signal=base_signal)
+            signal = self._apply_thesis_cooldown(signal=base_signal)
             if signal.score < self._config.min_signal_score:
                 continue
-
-            current_best = ranked_signals.get(signal.symbol_id)
-            if current_best is None or signal.score > current_best.score:
-                ranked_signals[signal.symbol_id] = signal
-
-        intents: list[TradeIntent] = []
-        selected_signal_count = 0
-
-        for signal in sorted(
-            ranked_signals.values(),
-            key=lambda item: item.score,
-            reverse=True,
-        ):
             if portfolio.has_open_position(signal.symbol_id):
                 continue
 
@@ -136,21 +154,210 @@ class SimpleEventDrivenStrategy:
             if not risk_result.approved:
                 continue
 
+            ranked_signal = self._rank_signal(
+                signal=signal,
+                quote=quote,
+                portfolio=portfolio,
+                proposed_notional=proposed_notional,
+                risk_result=risk_result,
+                recent_theses=recent_theses,
+            )
+            current_best = ranked_signals.get(signal.symbol_id)
+            if current_best is None or (
+                ranked_signal.composite_score,
+                ranked_signal.signal.score,
+            ) > (
+                current_best.composite_score,
+                current_best.signal.score,
+            ):
+                ranked_signals[signal.symbol_id] = ranked_signal
+
+        intents: list[TradeIntent] = []
+        selected_signal_count = 0
+        max_ranked_signals = self._max_ranked_signals_per_cycle()
+
+        for ranked_signal in sorted(
+            ranked_signals.values(),
+            key=lambda item: (item.composite_score, item.signal.score),
+            reverse=True,
+        ):
+            signal = ranked_signal.signal
             intents.extend(
                 _build_horizon_trade_intents(
                     signal=signal,
-                    allowed_notional=risk_result.allowed_notional,
-                    rationale_suffix=risk_result.notes
-                    + (f"Event {signal.event_type} cleared all configured risk checks.",),
+                    allowed_notional=ranked_signal.risk_result.allowed_notional,
+                    rationale_suffix=ranked_signal.risk_result.notes
+                    + (
+                        "Signal selected in the top "
+                        f"{max_ranked_signals} ranked opportunities for this cycle.",
+                        f"Event {signal.event_type} cleared all configured risk checks.",
+                    ),
                     exit_config=self._exit_config,
                 )
             )
             selected_signal_count += 1
 
-            if selected_signal_count >= self._config.max_intents_per_cycle:
+            if selected_signal_count >= max_ranked_signals:
                 break
 
         return intents
+
+    def _max_ranked_signals_per_cycle(self) -> int:
+        configured_limit = self._config.max_ranked_signals_per_cycle
+        if configured_limit is None:
+            configured_limit = self._config.max_intents_per_cycle
+        return max(1, configured_limit)
+
+    def _recent_thesis_states(self, *, signal: Signal) -> tuple[_ThesisCooldownState, ...]:
+        if not self._config.thesis_cooldown_enabled or self._config.thesis_cooldown_hours <= 0:
+            return ()
+
+        history_key = (signal.symbol_id, signal.side)
+        cooldown_window = timedelta(hours=self._config.thesis_cooldown_hours)
+        return tuple(
+            state
+            for state in self._thesis_cooldowns.get(history_key, [])
+            if signal.generated_at < state.last_seen_at + cooldown_window
+        )
+
+    def _best_thesis_match(
+        self,
+        *,
+        signal: Signal,
+        recent_theses: tuple[_ThesisCooldownState, ...],
+    ) -> tuple[float, _ThesisCooldownState | None]:
+        best_similarity = 0.0
+        best_state: _ThesisCooldownState | None = None
+
+        for state in recent_theses:
+            similarity = _thesis_similarity(signal=signal, state=state)
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_state = state
+
+        return best_similarity, best_state
+
+    def _rank_signal(
+        self,
+        *,
+        signal: Signal,
+        quote: PriceQuote,
+        portfolio: PortfolioSnapshot,
+        proposed_notional: float,
+        risk_result: RiskCheckResult,
+        recent_theses: tuple[_ThesisCooldownState, ...],
+    ) -> RankedSignal:
+        confidence_score = _clamp_score((signal.score * 0.7) + (signal.confidence * 0.3))
+        best_similarity, best_state = self._best_thesis_match(
+            signal=signal,
+            recent_theses=recent_theses,
+        )
+        repeat_count = 0 if best_state is None else best_state.repeat_count + 1
+        novelty_score = _clamp_score(
+            1.0 - min(1.0, best_similarity * (0.85 + (0.05 * repeat_count)))
+        )
+        risk_reward_score = self._risk_reward_score(
+            signal=signal,
+            quote=quote,
+            proposed_notional=proposed_notional,
+            risk_result=risk_result,
+        )
+        diversification_score = self._diversification_score(
+            signal=signal,
+            portfolio=portfolio,
+        )
+
+        weighted_components = (
+            (self._config.confidence_weight, confidence_score),
+            (self._config.novelty_weight, novelty_score),
+            (self._config.risk_reward_weight, risk_reward_score),
+            (self._config.diversification_weight, diversification_score),
+        )
+        total_weight = sum(max(weight, 0.0) for weight, _ in weighted_components) or 1.0
+        composite_score = round(
+            sum(max(weight, 0.0) * score for weight, score in weighted_components)
+            / total_weight,
+            4,
+        )
+        ranked_signal = RankedSignal(
+            signal=replace(signal),
+            composite_score=composite_score,
+            confidence_score=confidence_score,
+            novelty_score=novelty_score,
+            risk_reward_score=risk_reward_score,
+            diversification_score=diversification_score,
+            proposed_notional=proposed_notional,
+            risk_result=risk_result,
+        )
+        ranked_signal = replace(
+            ranked_signal,
+            signal=replace(
+                signal,
+                rationale=signal.rationale + ranked_signal.ranking_rationale(),
+            ),
+        )
+        return ranked_signal
+
+    def _risk_reward_score(
+        self,
+        *,
+        signal: Signal,
+        quote: PriceQuote,
+        proposed_notional: float,
+        risk_result: RiskCheckResult,
+    ) -> float:
+        aligned_move = 0.0
+        if quote.open > 0:
+            session_move = (quote.current - quote.open) / quote.open
+            aligned_move = (
+                max(session_move, 0.0)
+                if signal.side == "buy"
+                else max(-session_move, 0.0)
+            )
+        aligned_score = _clamp_score(aligned_move / 0.03)
+        configured_rr = self._exit_config.profit_target_fraction / max(
+            self._exit_config.stop_loss_fraction,
+            0.0001,
+        )
+        reward_risk_component = _clamp_score(configured_rr / 2.0)
+        sizing_efficiency = _clamp_score(
+            risk_result.allowed_notional / proposed_notional if proposed_notional > 0 else 0.0
+        )
+        return _clamp_score(
+            (signal.score * 0.45)
+            + (aligned_score * 0.3)
+            + (reward_risk_component * 0.15)
+            + (sizing_efficiency * 0.1)
+        )
+
+    def _diversification_score(
+        self,
+        *,
+        signal: Signal,
+        portfolio: PortfolioSnapshot,
+    ) -> float:
+        if not portfolio.positions:
+            return 1.0
+
+        total_open_notional = max(portfolio.total_open_notional(), 0.0)
+        target_side = "long" if signal.side == "buy" else "short"
+        same_side_notional = sum(
+            position.notional_usd
+            for position in portfolio.positions
+            if position.side == target_side
+        )
+        side_diversity = 1.0
+        if total_open_notional > 0:
+            side_diversity = 1.0 - (same_side_notional / total_open_notional)
+
+        same_theme_count = sum(
+            1
+            for position in portfolio.positions
+            if position.event_type is not None
+            and event_performance_group(position.event_type) == signal.event_group
+        )
+        theme_diversity = 1.0 - (same_theme_count / max(len(portfolio.positions), 1))
+        return _clamp_score((0.2 * 1.0) + (0.5 * side_diversity) + (0.3 * theme_diversity))
 
     def _apply_thesis_cooldown(self, *, signal: Signal) -> Signal:
         """Decay repeated or highly similar theses so the strategy seeks fresh setups."""
@@ -162,24 +369,15 @@ class SimpleEventDrivenStrategy:
             return signal
 
         history_key = (signal.symbol_id, signal.side)
-        cooldown_window = timedelta(hours=self._config.thesis_cooldown_hours)
         similarity_threshold = min(max(self._config.thesis_similarity_threshold, 0.0), 1.0)
-        recent_states = [
-            state
-            for state in self._thesis_cooldowns.get(history_key, [])
-            if signal.generated_at < state.last_seen_at + cooldown_window
-        ]
+        recent_states = list(self._recent_thesis_states(signal=signal))
 
         repeat_count = 0
         adjusted_signal = signal
-        best_similarity = 0.0
-        best_state: _ThesisCooldownState | None = None
-
-        for state in recent_states:
-            similarity = _thesis_similarity(signal=signal, state=state)
-            if similarity > best_similarity:
-                best_similarity = similarity
-                best_state = state
+        best_similarity, best_state = self._best_thesis_match(
+            signal=signal,
+            recent_theses=tuple(recent_states),
+        )
 
         if best_state is not None and best_similarity >= similarity_threshold:
             repeat_count = best_state.repeat_count + 1
@@ -381,6 +579,10 @@ def _jaccard_similarity(left: tuple[str, ...], right: tuple[str, ...]) -> float:
     if not left_set or not right_set:
         return 0.0
     return len(left_set & right_set) / len(left_set | right_set)
+
+
+def _clamp_score(value: float) -> float:
+    return round(min(max(value, 0.0), 1.0), 4)
 
 
 def _build_horizon_trade_intents(
